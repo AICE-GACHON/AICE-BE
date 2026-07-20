@@ -15,10 +15,9 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
 
-    CODEF_CLIENT_ID: str = ""
-    CODEF_CLIENT_SECRET: str = ""
-
-    KAKAO_REST_API_KEY: str = ""
+    # OpenReview API (papers/reviews/revisions 수집용, openreview-py 사용 예정)
+    OPENREVIEW_USERNAME: str = ""
+    OPENREVIEW_PASSWORD: str = ""
 
 
 settings = Settings()

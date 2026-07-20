@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 
-# 도메인: user
-# API 명세서(Notion)의 'user' 도메인 API들을 여기에 하나씩 구현합니다.
+# 도메인: user (내 정보 조회/수정)
 router = APIRouter(prefix="/api/user", tags=["user"])
 
 
