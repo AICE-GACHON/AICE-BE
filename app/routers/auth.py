@@ -5,12 +5,13 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse, UserResponse
+from app.schemas.common import ApiResponse
 
 # 도메인: auth (회원가입 / 로그인)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-@router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", response_model=ApiResponse[UserResponse], status_code=status.HTTP_201_CREATED)
 def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 가입된 이메일입니다.")
@@ -23,10 +24,10 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
-    return user
+    return ApiResponse[UserResponse](data=UserResponse.model_validate(user))
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=ApiResponse[TokenResponse])
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if user is None or not verify_password(payload.password, user.password_hash):
@@ -36,4 +37,4 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         )
 
     access_token = create_access_token(subject=str(user.user_id))
-    return TokenResponse(access_token=access_token)
+    return ApiResponse[TokenResponse](data=TokenResponse(access_token=access_token))

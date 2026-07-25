@@ -5,13 +5,14 @@ from app.core.deps import get_current_user
 from app.database import get_db
 from app.models.submission import Submission
 from app.models.user import User
+from app.schemas.common import ApiResponse
 from app.schemas.submission import SubmissionCreate, SubmissionResponse
 
 # 도메인: submission (사용자가 올린 내 논문 초안 업로드/조회)
 router = APIRouter(prefix="/api/submissions", tags=["submission"])
 
 
-@router.post("", response_model=SubmissionResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ApiResponse[SubmissionResponse], status_code=status.HTTP_201_CREATED)
 def create_submission(
     payload: SubmissionCreate,
     db: Session = Depends(get_db),
@@ -27,4 +28,4 @@ def create_submission(
     db.add(submission)
     db.commit()
     db.refresh(submission)
-    return submission
+    return ApiResponse[SubmissionResponse](data=SubmissionResponse.model_validate(submission))

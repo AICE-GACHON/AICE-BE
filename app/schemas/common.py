@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,3 +16,21 @@ class TimestampMixin(BaseModel):
 class Message(BaseModel):
     """단순 메시지 응답 (ping, 성공 알림 등)."""
     message: str
+
+
+DataT = TypeVar("DataT")
+
+
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+
+
+class ApiResponse(BaseModel, Generic[DataT]):
+    """
+    모든 API 응답을 감싸는 공통 포맷. 성공이면 data에 실제 응답을,
+    실패면 error에 에러 정보를 채웁니다 (전역 에러 핸들러는 app/core/error_handlers.py 참고).
+    """
+    success: bool = True
+    data: DataT | None = None
+    error: ErrorDetail | None = None

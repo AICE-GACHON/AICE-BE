@@ -2,13 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.deps import get_current_user
 from app.models.user import User
+from app.schemas.common import ApiResponse
 from app.schemas.feedback import ReviewPredictionRequest, ReviewPredictionResponse
 
 # 도메인: feedback (핵심 기능 - 유사 논문 검색 + 예상 리뷰/수정 제안)
 router = APIRouter(prefix="/api/feedback", tags=["feedback"])
 
 
-@router.post("/predictions", response_model=ReviewPredictionResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/predictions", response_model=ApiResponse[ReviewPredictionResponse], status_code=status.HTTP_201_CREATED)
 def create_prediction(
     payload: ReviewPredictionRequest,
     current_user: User = Depends(get_current_user),
