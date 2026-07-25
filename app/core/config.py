@@ -10,6 +10,9 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
+    # 프론트엔드 개발 서버 주소들 (콤마로 구분). 배포 시 실제 프론트 도메인으로 교체.
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
