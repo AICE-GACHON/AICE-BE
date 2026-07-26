@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
 
+    # Google 로그인용 OAuth 클라이언트 ID (Google Cloud Console에서 발급).
+    # id_token 검증 시 audience로 쓰인다. 비어 있으면 POST /api/auth/google이
+    # 항상 401을 반환한다 (google_oauth.verify_google_id_token).
+    GOOGLE_CLIENT_ID: str = ""
+
     # OpenReview 계정 — 논문 코퍼스 재수집 배치(scripts/, paper_assistant/ingest/)에서만
     # 쓴다. 코퍼스는 이미 적재돼 있어 서버 운영에는 비어 있어도 된다.
     # 실제로 이 값을 읽는 쪽은 paper_assistant/config.py다.

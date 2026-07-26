@@ -5,13 +5,14 @@ from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user
+from app.core.google_oauth import verify_google_id_token
 from app.core.security import (
     create_access_token, create_refresh_token, decode_token, hash_password, verify_password,
 )
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import (
-    LoginRequest, RefreshRequest, SignupRequest, TokenResponse, UserResponse,
+    GoogleLoginRequest, LoginRequest, RefreshRequest, SignupRequest, TokenResponse, UserResponse,
 )
 from app.schemas.common import ApiResponse, Message
 
@@ -32,6 +33,7 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         email=payload.email,
         password_hash=hash_password(payload.password),
         nickname=payload.nickname,
+        openreview_id=payload.openreview_id,
     )
     db.add(user)
     db.commit()
@@ -42,11 +44,67 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
 @router.post("/login", response_model=ApiResponse[TokenResponse])
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
-    if user is None or not verify_password(payload.password, user.password_hash):
+    # password_hash가 없으면 구글 전용 계정 — verify_password에 None을 넘기면
+    # passlib이 에러를 던지므로 그 전에 걸러야 한다.
+    if user is None or user.password_hash is None or not verify_password(
+        payload.password, user.password_hash
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="이메일 또는 비밀번호가 올바르지 않습니다.",
         )
+
+    access_token = create_access_token(subject=str(user.user_id))
+    refresh_token = create_refresh_token(subject=str(user.user_id), version=user.token_version)
+    return ApiResponse[TokenResponse](
+        data=TokenResponse(access_token=access_token, refresh_token=refresh_token)
+    )
+
+
+@router.post("/google", response_model=ApiResponse[TokenResponse])
+def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
+    """구글 로그인/연동. 처음 보는 구글 계정이면 openreview_id가 필수다.
+
+    매칭 우선순위: google_sub(이미 연동된 계정) → email(이메일로 가입한 기존
+    계정에 이번에 연동) → 신규 가입. 이메일 계정에 연동될 때는 비밀번호 로그인도
+    계속 가능하다 — google_sub만 채워질 뿐 password_hash는 그대로 둔다.
+    """
+    try:
+        claims = verify_google_id_token(payload.id_token)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="구글 로그인에 실패했습니다.")
+
+    google_sub = claims["sub"]
+    email = claims.get("email")
+
+    user = db.query(User).filter(User.google_sub == google_sub).first()
+
+    if user is None and email:
+        user = db.query(User).filter(User.email == email).first()
+        if user is not None:
+            user.google_sub = google_sub
+            db.commit()
+
+    if user is None:
+        if not payload.openreview_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="처음 구글로 가입할 때는 openreview_id가 필요합니다.",
+            )
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="구글 계정에 이메일이 없습니다."
+            )
+        user = User(
+            email=email,
+            password_hash=None,
+            nickname=claims.get("name") or email,
+            google_sub=google_sub,
+            openreview_id=payload.openreview_id,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
     access_token = create_access_token(subject=str(user.user_id))
     refresh_token = create_refresh_token(subject=str(user.user_id), version=user.token_version)

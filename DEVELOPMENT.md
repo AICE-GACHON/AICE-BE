@@ -84,9 +84,12 @@ users ──< submissions                     papers ──< reviews ──< rev
 ```
 
 ### 서비스 테이블
-- **users**: 회원. 이메일/비밀번호 기반 인증. `token_version`은 refresh_token 폐기용
-  버전 카운터로, 로그아웃 시 증가시켜 그 이전에 발급된 refresh_token을 전부 무효화합니다
-  (`alembic/versions/0002_add_user_token_version.py`).
+- **users**: 회원. 이메일/비밀번호 또는 구글(`google_sub`) 인증. `openreview_id`는
+  가입 경로와 무관하게 필수입니다(서비스가 OpenReview 코퍼스 기반이라 신원 값으로
+  사용). `password_hash`는 구글 전용 계정이 있어 nullable입니다
+  (`alembic/versions/0003_add_google_and_openreview_id.py`). `token_version`은
+  refresh_token 폐기용 버전 카운터로, 로그아웃 시 증가시켜 그 이전에 발급된
+  refresh_token을 전부 무효화합니다 (`alembic/versions/0002_add_user_token_version.py`).
 - **submissions**: 사용자가 올린 내 논문 초안. 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
   결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
@@ -142,6 +145,7 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 |---|---|---|---|
 | Auth | `POST /api/auth/signup` | 회원가입 | - |
 | Auth | `POST /api/auth/login` | 로그인, access_token + refresh_token 발급 | - |
+| Auth | `POST /api/auth/google` | 구글 로그인/연동 (id_token 검증, 신규 가입 시 openreview_id 필수) | - |
 | Auth | `POST /api/auth/refresh` | refresh_token으로 access_token 재발급 (refresh_token도 회전) | - |
 | Auth | `POST /api/auth/logout` | 로그아웃 (User.token_version 증가 → 이전 refresh_token 전부 무효화) | 필요 |
 | User | `GET /api/user/me` | 내 정보 조회 | 필요 |

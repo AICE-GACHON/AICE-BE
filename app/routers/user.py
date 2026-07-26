@@ -22,7 +22,11 @@ def update_me(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    current_user.nickname = payload.nickname
+    """nickname/openreview_id 중 보낸 필드만 갱신한다 (둘 다 선택)."""
+    if payload.nickname is not None:
+        current_user.nickname = payload.nickname
+    if payload.openreview_id is not None:
+        current_user.openreview_id = payload.openreview_id
     db.commit()
     db.refresh(current_user)
     return ApiResponse[UserResponse](data=UserResponse.model_validate(current_user))
