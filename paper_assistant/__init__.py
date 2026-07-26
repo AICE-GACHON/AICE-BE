@@ -1,9 +1,10 @@
 """paper_assistant — ML/AI 논문 리서치 어시스턴트 (AI 파트).
 
 공개 API (백엔드 통합 계약):
-    from paper_assistant import analyze, get_paper_detail
+    from paper_assistant import analyze, get_paper_detail, get_paper_revisions
     report = analyze(title, abstract)        # -> Report (Pydantic)
     detail = get_paper_detail(paper_id)      # -> PaperDetail | None
+    revs = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API 호출)
 """
 
 
@@ -20,3 +21,13 @@ def get_paper_detail(*args, **kwargs):
     """
     from paper_assistant.detail import get_paper_detail as _detail
     return _detail(*args, **kwargs)
+
+
+def get_paper_revisions(*args, **kwargs):
+    """저자가 리뷰를 받고 무엇을 고쳤는지 (제목·초록·PDF 변경 이력).
+
+    DB에는 최신 버전만 남으므로 OpenReview API를 실시간 조회한다 — 느리고
+    실패할 수 있으니 사용자가 명시적으로 요청했을 때만 호출할 것.
+    """
+    from paper_assistant.revisions import get_paper_revisions as _revs
+    return _revs(*args, **kwargs)

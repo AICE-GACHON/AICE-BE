@@ -13,10 +13,13 @@ Create Date: 2026-07-21 (2026-07-26 AI 파트 통합으로 재작성)
 
 통합 전 버전과 달라진 점 (전부 의도된 변경):
   - papers / reviews / revisions 테이블 제거
-      papers·reviews는 코퍼스 쪽이 정본입니다. revisions("리뷰 이후 어떻게 수정됐는지")는
-      OpenReview에서 수집한 데이터가 없어 채울 수가 없습니다. 대신 같은 논문의 재투고
-      흐름(ICLR reject → NeurIPS accept)을 코퍼스의 submission_links로 추적하고,
-      분석 결과의 resubmission_flows로 내려줍니다.
+      papers·reviews는 코퍼스 쪽이 정본입니다.
+      revisions("리뷰 이후 어떻게 수정됐는지")는 저장하지 않습니다 — papers는
+      openreview_id로 upsert해서 최신 버전만 남기 때문에 과거 버전을 담을 수가 없고,
+      대신 GET /api/papers/{id}/revisions가 OpenReview API를 실시간 조회합니다
+      (paper_assistant.get_paper_revisions). 학회를 옮겨 다시 낸 흐름
+      (ICLR reject → NeurIPS accept)은 그와 별개로 코퍼스의 submission_links로
+      추적해 분석 결과의 resubmission_flows로 내려줍니다.
   - similar_paper_matches.similarity_score 제거
       논문별 유사도 점수는 만들 수 없습니다 (검색 상위 20편의 코사인 폭이 0.013이라
       1위와 20위가 사실상 같은 값). rank + match_type으로 대체했습니다.

@@ -80,6 +80,26 @@
   .star { color:var(--accent); }
   .split { display:inline-block; font-size:11px; padding:1px 6px; border-radius:9px;
            background:#fdf0e3; color:#a35b12; margin-left:4px; }
+  /* --- 수정 이력 타임라인 --- */
+  .rev-list { border-left:2px solid var(--line); margin:8px 0 0 6px; padding-left:14px; }
+  .rev-item { position:relative; padding:8px 0; }
+  .rev-item::before { content:''; position:absolute; left:-20px; top:14px; width:8px;
+                      height:8px; border-radius:50%; background:var(--line); }
+  .rev-item.rebuttal::before { background:var(--accent); }
+  .rev-when { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .rev-kind { display:inline-block; font-size:11px; font-weight:600; border-radius:6px;
+              padding:1px 7px; margin-right:7px; background:#eef1f6; color:var(--muted); }
+  .rev-item.rebuttal .rev-kind { background:#eef3ff; color:#2c53c0; }
+  .chg { margin:6px 0 0; font-size:13px; }
+  .chg-label { font-weight:600; font-size:12px; color:var(--muted); }
+  .chg-text { background:#fff; border:1px solid var(--line); border-radius:8px;
+              padding:8px 10px; margin-top:4px; line-height:1.7; word-break:break-word; }
+  .d-ins { background:#dcf5e7; color:#0d5c3c; border-radius:3px; padding:0 2px; }
+  .d-del { background:#fde2e0; color:#8f2f28; border-radius:3px; padding:0 2px;
+           text-decoration:line-through; }
+  .rev-file { font-size:12px; color:var(--accent); text-decoration:none; font-weight:600;
+              margin-left:6px; }
+  .rev-file:hover { text-decoration:underline; }
   .warn { margin-top:10px; padding:9px 11px; border-radius:8px; font-size:13px;
           background:#fdf0e3; color:#8a4d10; border:1px solid #f0d8bb; }
   .warn.danger { background:#fdeceb; color:#8f2f28; border-color:#f2c9c5;
@@ -190,6 +210,11 @@ function detailHTML(x) {
   if (x.arxiv_url) h += `<a href="${esc(x.arxiv_url)}" target="_blank" rel="noopener">arXiv ↗</a>`;
   h += `</div>`;
 
+  // 수정 이력은 DB에 없다 — 누르면 OpenReview를 실시간 조회한다 (revisions.py).
+  // 매번 자동으로 부르면 상세 열 때마다 외부 API를 20번 때리게 된다.
+  h += `<button class="more-btn rev-btn" data-pid="${x.paper_id}">수정 이력 보기</button>
+        <div class="rev-box"></div>`;
+
   if (x.authors.length)
     h += `<h4>저자</h4><div>${x.authors.map(esc).join(', ')}</div>`;
   if (x.keywords.length)
@@ -256,6 +281,65 @@ function detailHTML(x) {
   return h;
 }
 
+// --- 수정 이력 (저자가 리뷰 받고 뭘 고쳤는지) ---
+// 백엔드가 이미 단어 단위 diff를 조각으로 잘라 보내준다 — 여기선 색만 입힌다.
+function revisionsHTML(x) {
+  if (!x.supported || !x.revisions.length)
+    return `<div class="muted" style="margin-top:8px">${esc(x.message||"수정 이력이 없습니다.")}</div>`;
+
+  let h = `<div class="rev-list">`;
+  for (const r of x.revisions) {
+    h += `<div class="rev-item ${esc(r.kind)}">
+      <span class="rev-kind">${esc(r.kind_label)}</span><span class="rev-when">${esc(r.date)}</span>`;
+    // 가장 이른 edit은 '그 이전 버전'을 모른다 — 무엇이 바뀌었다고 말할 수 없다.
+    if (r.is_baseline)
+      h += `<div class="muted" style="margin-top:3px">여기서부터 이력이 공개됩니다 (이전 내용은 비공개).</div>`;
+    else if (!r.changes.length)
+      h += `<div class="muted" style="margin-top:3px">추적 대상 필드(제목·초록·PDF 등)에는 변경이 없습니다.</div>`;
+
+    for (const c of r.changes) {
+      h += `<div class="chg"><span class="chg-label">${esc(c.label)}</span>`;
+      if (c.kind === "text" && c.segments.length) {
+        h += ` <span class="muted">— 유사도 ${c.similarity}</span><div class="chg-text">`;
+        for (const s of c.segments) {
+          const cls = s.op === "insert" ? "d-ins" : s.op === "delete" ? "d-del" : "";
+          h += cls ? `<span class="${cls}">${esc(s.text)}</span> ` : `${esc(s.text)} `;
+        }
+        h += `</div>`;
+      } else if (c.kind === "file") {
+        // 파일은 해시만 바뀌어 내용 비교가 안 된다 — 대신 양쪽 원본을 직접 연다.
+        h += ` ${esc(c.after)}`;
+        if (c.before_url) h += ` <a class="rev-file" href="${esc(c.before_url)}" target="_blank" rel="noopener">이전본 ↗</a>`;
+        if (c.after_url)  h += ` <a class="rev-file" href="${esc(c.after_url)}" target="_blank" rel="noopener">이후본 ↗</a>`;
+      } else {
+        // after가 null이면 필드가 지워진 것이다 (백엔드 _unwrap의 delete 처리)
+        h += ` ${c.after === null ? "삭제됨"
+                : c.before ? `<span class="d-del">${esc(c.before)}</span> → <span class="d-ins">${esc(c.after)}</span>`
+                : esc(c.after)}`;
+      }
+      h += `</div>`;
+    }
+    h += `</div>`;
+  }
+  return h + `</div>`;
+}
+
+async function loadRevisions(btn) {
+  const box = btn.nextElementSibling;
+  btn.disabled = true;
+  box.innerHTML = `<div class="muted" style="margin-top:8px">OpenReview 조회 중…</div>`;
+  try {
+    const r = await fetch(`/api/paper/${btn.dataset.pid}/revisions`);
+    const x = await r.json();
+    if (!r.ok) { box.innerHTML = `<span class="err">${esc(x.error||r.status)}</span>`; btn.disabled = false; return; }
+    box.innerHTML = revisionsHTML(x);
+    btn.remove();
+  } catch (e) {
+    box.innerHTML = `<span class="err">불러오기 실패: ${esc(String(e))}</span>`;
+    btn.disabled = false;
+  }
+}
+
 async function toggleDetail(row) {
   const box = row.querySelector(".detail");
   if (!row.classList.contains("open")) {
@@ -282,6 +366,7 @@ $("result").addEventListener("click", e => {
     e.target.remove();
     return;
   }
+  if (e.target.classList.contains("rev-btn")) { loadRevisions(e.target); return; }
   const top = e.target.closest(".paper-top");
   if (top) { toggleDetail(top.parentElement); return; }
   if (e.target.id === "more-btn") {

@@ -105,6 +105,64 @@ class PaperDetail(BaseModel):
     review_points: list[ReviewPointDetail] = Field(default_factory=list)
 
 
+class DiffSegment(BaseModel):
+    """텍스트 변경의 단어 단위 조각. 프론트가 색만 입혀 그리면 된다."""
+    op: str = Field(description="equal | insert | delete")
+    text: str
+
+
+class FieldChange(BaseModel):
+    """리비전 1건에서 바뀐 필드 하나."""
+    field: str = Field(description="OpenReview content 필드명")
+    label: str = Field(description="화면 표시용 한국어 라벨")
+    kind: str = Field(description="text(단어 diff 있음) | file(교체 여부만) | value")
+    before: str | None = None
+    after: str | None = None
+    similarity: float | None = Field(
+        default=None, description="text일 때 단어 단위 유사도(1.0=동일)")
+    segments: list[DiffSegment] = Field(
+        default_factory=list, description="text일 때만. 길면 잘려 있을 수 있다")
+
+    # 파일(pdf/보충자료)일 때만. 그 시점 파일을 실제로 내려받는 링크다 —
+    # content에 실린 /pdf/<해시>.pdf 경로는 교체되면 404라 쓸 수 없다(실측).
+    before_url: str | None = None
+    after_url: str | None = None
+
+
+class RevisionEntry(BaseModel):
+    """저자가 제출본을 고친 시점 1건."""
+    revision_id: str
+    kind: str = Field(
+        description="submission | rebuttal | camera_ready | withdrawal | other")
+    kind_label: str
+    timestamp: int = Field(description="epoch ms")
+    date: str = Field(description="YYYY-MM-DD HH:MM (KST)")
+    changes: list[FieldChange] = Field(default_factory=list)
+    is_baseline: bool = Field(
+        default=False,
+        description="관측 가능한 첫 버전. 이전 내용을 모르므로 diff가 없다")
+
+
+class PaperRevisions(BaseModel):
+    """논문 1편의 수정 이력 (get_paper_revisions 반환).
+
+    ⚠️ papers 테이블에는 **최신 버전만** 저장된다 — openreview_id를 자연 키로
+    upsert하므로 수정 전 내용은 남지 않는다(db/load.py). 그래서 이 조회는 DB가
+    아니라 OpenReview API를 실시간으로 때린다. 느리고(수백 ms) 실패할 수 있어
+    analyze()나 PaperDetail에 합치지 않고 별도 호출로 뺐다.
+
+    2023년 이전 venue(v1 API)는 저자 수정 이력이 공개되지 않는다 — 읽을 수 있는
+    건 code 링크·게재일 같은 운영 메타데이터뿐이라 supported=False로 돌려준다.
+    없는 걸 빈 목록으로 주면 '수정이 없었다'로 오독되기 때문이다.
+    """
+    paper_id: int
+    openreview_id: str
+    supported: bool = Field(description="이 venue에서 수정 이력을 볼 수 있는가")
+    message: str | None = Field(
+        default=None, description="불가 사유 또는 '이력 없음' 안내. 그대로 노출 가능")
+    revisions: list[RevisionEntry] = Field(default_factory=list)
+
+
 class ReviewPattern(BaseModel):
     """유사 논문들에서 반복 등장하는 지적 패턴.
 

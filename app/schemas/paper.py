@@ -8,9 +8,25 @@ AI 파트가 소유하고(scripts/init_db.sql), 조회도 paper_assistant.get_pa
 ⚠️ paper_id는 UUID가 아니라 **BIGINT**입니다. 코퍼스는 43,515편이 BIGSERIAL로 적재돼
 있고, 분석 결과(Report.similar_papers[].paper_id)도 이 id를 그대로 내려줍니다.
 """
-from paper_assistant.schemas import PaperDetail, ReviewDetail, ReviewPointDetail
+from paper_assistant.schemas import (
+    FieldChange, PaperDetail, PaperRevisions, ReviewDetail, ReviewPointDetail,
+    RevisionEntry,
+)
 
 # 백엔드 응답 이름으로 쓰는 별칭 (기존 PaperResponse 자리를 대체)
 PaperResponse = PaperDetail
 
-__all__ = ["PaperResponse", "PaperDetail", "ReviewDetail", "ReviewPointDetail"]
+# 수정 이력 응답. 통합 전 RevisionResponse(revisions 테이블 행)를 대체합니다 —
+# 수정 이력은 DB에 저장하지 않고 OpenReview API를 실시간 조회합니다.
+RevisionsResponse = PaperRevisions
+
+__all__ = [
+    "PaperResponse",
+    "PaperDetail",
+    "ReviewDetail",
+    "ReviewPointDetail",
+    "RevisionsResponse",
+    "PaperRevisions",
+    "RevisionEntry",
+    "FieldChange",
+]

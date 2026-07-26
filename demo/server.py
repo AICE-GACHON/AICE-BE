@@ -16,7 +16,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from paper_assistant import analyze, get_paper_detail
+from paper_assistant import analyze, get_paper_detail, get_paper_revisions
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("demo")
@@ -75,6 +75,20 @@ def api_paper(paper_id: int):
     if detail is None:
         return JSONResponse({"error": "논문을 찾을 수 없습니다."}, status_code=404)
     return JSONResponse(detail.model_dump())
+
+
+@app.get("/api/paper/{paper_id}/revisions")
+def api_paper_revisions(paper_id: int):
+    """수정 이력 (저자가 리뷰 받고 뭘 고쳤는지). OpenReview를 실시간 조회하므로
+    상세보다 느리다 — '수정 이력 보기'를 눌렀을 때만 호출된다."""
+    try:
+        revs = get_paper_revisions(paper_id)
+    except Exception as e:
+        log.exception("get_paper_revisions 실패")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    if revs is None:
+        return JSONResponse({"error": "논문을 찾을 수 없습니다."}, status_code=404)
+    return JSONResponse(revs.model_dump())
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

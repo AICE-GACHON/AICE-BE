@@ -98,7 +98,11 @@ POST /api/submissions/{id}/analysis        분석 시작 → 202, status=pending
 GET  /api/submissions/{id}/analysis        폴링 → status=done 이면 report 포함
         ↓
 GET  /api/papers/{paper_id}                근거로 쓰인 유사 논문 원문·리뷰 전문
+GET  /api/papers/{paper_id}/revisions      그 논문의 저자가 리뷰 후 무엇을 고쳤는지
 ```
+
+마지막 하나만 OpenReview API를 실시간으로 조회합니다 — 느리고 실패할 수 있으니
+사용자가 '수정 이력'을 눌렀을 때만 호출하세요.
 
 ## 프론트가 특히 주의할 것
 

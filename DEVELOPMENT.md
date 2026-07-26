@@ -105,7 +105,7 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 | 대상 | 이유 |
 |---|---|
 | `papers`, `reviews` (백엔드판) | 코퍼스 쪽이 정본. UUID/TEXT 스키마로는 43,515편과 벡터 검색을 담을 수 없음 |
-| `revisions` | "리뷰 이후 어떻게 수정됐는지"는 수집된 데이터가 없음 → 재투고 흐름(`resubmission_flows`)으로 대체 |
+| `revisions` | 저장할 수가 없음 — papers는 openreview_id로 upsert라 최신 버전만 남음. 대신 `GET /api/papers/{id}/revisions`가 OpenReview를 실시간 조회 |
 | `similar_paper_matches.similarity_score` | 논문별 유사도 점수는 만들 수 없음 (아래 6번) → `rank` + `match_type`으로 대체 |
 | `submissions.embedding` | 저장하려면 vector(768)이어야 하는데, 재사용 이득보다 스키마 결합이 큼 |
 
@@ -145,6 +145,7 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 | Feedback | `POST /api/submissions/{id}/analysis` | 분석 시작 → **202**, status=pending | 필요 |
 | Feedback | `GET /api/submissions/{id}/analysis` | 분석 상태/결과 조회 (폴링) | 필요 |
 | Paper | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
+| Paper | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
 | Review | `GET /api/reviews?paper_id=` | 특정 논문의 리뷰 목록 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
@@ -154,14 +155,21 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 
 ## 8. AI팀 연동 방식
 
-AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은 함수 두 개입니다.
+AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은 함수 세 개입니다.
 
 ```python
-from paper_assistant import analyze, get_paper_detail
+from paper_assistant import analyze, get_paper_detail, get_paper_revisions
 
-report = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report (Pydantic)
-detail = get_paper_detail(paper_id)                              # -> PaperDetail | None
+report   = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report
+detail   = get_paper_detail(paper_id)        # -> PaperDetail | None    (DB만)
+revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API)
 ```
+
+- `get_paper_revisions()`만 **외부 네트워크(OpenReview API)** 를 탑니다. papers 테이블은
+  openreview_id로 upsert해서 최신 버전만 남기 때문에 과거 버전이 DB에 없습니다.
+  느리고 실패할 수 있으므로 사용자가 명시적으로 요청했을 때만 호출합니다.
+  `supported=false`는 "수정이 없었다"가 아니라 "볼 수 없다"는 뜻이며(2023년 이전 학회는
+  저자 수정 이력을 공개하지 않음), 이때 `message`를 그대로 사용자에게 보여주면 됩니다.
 
 - `analyze()`는 **stateless**입니다 — DB에 아무것도 쓰지 않고 `Report`만 돌려줍니다.
   결과를 사용자·submission에 묶어 저장하는 건 `app/services/analysis.py`의 몫입니다.

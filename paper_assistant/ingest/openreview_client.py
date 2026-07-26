@@ -125,6 +125,22 @@ class OpenReviewClient:
         """논문 forum의 모든 리플라이 (리뷰/메타리뷰/rebuttal/decision)."""
         return list(self.iter_notes(forum=forum_id))
 
+    def get_note_edits(self, note_id: str) -> list[dict]:
+        """note의 수정 이력을 시간순(오래된 것부터)으로.
+
+        **v2 전용**이다. v1에는 /references가 있지만 공개로 읽히는 건 code 링크·
+        게재일 같은 운영 메타데이터뿐이고 저자가 고친 제목·초록·PDF는 안 보인다
+        (v1 venue 5곳 30편 실측: 본문 리비전 0건). 그래서 v1은 호출하지 않는다.
+
+        주의: 각 edit의 note.content는 전체 스냅샷이 아니라 **그 시점에 바뀐
+        필드만** 담은 부분 패치다. 값은 {"value": ...}로 감싸여 있고, 필드 삭제는
+        {"delete": True}로 온다. 버전을 복원하려면 앞에서부터 누적 적용해야 한다.
+        """
+        if self.base != V2:
+            return []
+        data = self._get("/notes/edits", **{"note.id": note_id})
+        return sorted(data.get("edits", []), key=lambda e: e.get("tcdate", 0))
+
 
 # --- venue 레지스트리 (실측으로 확인된 API 버전 및 invitation 이름) ---
 
