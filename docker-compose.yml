@@ -1,0 +1,28 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: paper-assistant-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paper
+      POSTGRES_PASSWORD: paper
+      POSTGRES_DB: paper_assistant
+      # 논문 제목/초록 대상 full-text 검색을 위해 영어 로케일로 초기화
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    # HNSW 인덱스 병렬 빌드가 공유 메모리를 쓴다. 기본 /dev/shm(64MB)이 작아
+    # "could not resize shared memory segment"로 실패하므로 확대한다.
+    shm_size: "1gb"
+    ports:
+      - "5433:5432"   # 로컬에 다른 Postgres가 있어도 충돌하지 않도록 5433 사용
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 최초 기동 시 자동 실행 (컨테이너를 새로 만들 때만 적용)
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paper -d paper_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

@@ -18,8 +18,12 @@ env/
 # OS
 .DS_Store
 
-# Alembic
-*.pyc
-
 # Logs
 *.log
+
+# 테스트 캐시
+.pytest_cache/
+
+# AI 파트 수집 원본/캐시 (수 GB). 코퍼스는 git이 아니라 DB 덤프로 배포한다 —
+# README "논문 코퍼스 받기" 참고.
+data/
