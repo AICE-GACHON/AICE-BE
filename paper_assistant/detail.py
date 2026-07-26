@@ -8,7 +8,9 @@ LLM도 임베딩도 쓰지 않는 순수 조회라 응답이 빠르다.
 import logging
 
 from paper_assistant.db.connection import cursor
-from paper_assistant.schemas import PaperDetail, ReviewDetail, ReviewPointDetail
+from paper_assistant.schemas import (
+    PaperDetail, PaperListResponse, PaperSummary, ReviewDetail, ReviewPointDetail,
+)
 
 log = logging.getLogger(__name__)
 
@@ -87,3 +89,54 @@ def get_paper_detail(paper_id: int) -> PaperDetail | None:
         arxiv_url=f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None,
         reviews=reviews, review_points=points,
     )
+
+
+def list_papers(
+    venue: str | None = None,
+    year: int | None = None,
+    field: str | None = None,
+    q: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> PaperListResponse:
+    """논문 목록 조회. venue/year/field(primary_area)로 좁히고 q로 제목·초록을
+    전문검색한다(papers.tsv, get_paper_detail과 동일하게 LLM·임베딩 없는 순수 조회).
+    """
+    where: list[str] = []
+    params: list = []
+    if venue:
+        where.append("venue = %s")
+        params.append(venue)
+    if year is not None:
+        where.append("year = %s")
+        params.append(year)
+    if field:
+        where.append("primary_area = %s")
+        params.append(field)
+    if q:
+        where.append("tsv @@ plainto_tsquery('english', %s)")
+        params.append(q)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+
+    with cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM papers {clause}", params)
+        total = cur.fetchone()[0]
+
+        cur.execute(
+            f"""
+            SELECT id, openreview_id, title, venue, year, decision, primary_area
+            FROM papers {clause}
+            ORDER BY year DESC, id
+            LIMIT %s OFFSET %s
+            """,
+            [*params, limit, offset],
+        )
+        items = [
+            PaperSummary(
+                paper_id=r[0], openreview_id=r[1], title=r[2], venue=r[3],
+                year=r[4], decision=r[5], primary_area=r[6],
+            )
+            for r in cur.fetchall()
+        ]
+
+    return PaperListResponse(total=total, items=items)

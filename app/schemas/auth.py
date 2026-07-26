@@ -16,6 +16,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class UserUpdateRequest(BaseModel):
+    nickname: str = Field(min_length=1, max_length=50)
+
+
 class UserResponse(ORMBase, TimestampMixin):
     user_id: uuid.UUID
     email: EmailStr
@@ -24,4 +32,5 @@ class UserResponse(ORMBase, TimestampMixin):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"

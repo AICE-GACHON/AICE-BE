@@ -23,6 +23,12 @@ def get_paper_detail(*args, **kwargs):
     return _detail(*args, **kwargs)
 
 
+def list_papers(*args, **kwargs):
+    """venue/year/field/q로 코퍼스 논문 목록을 조회한다. DB 조회만 하므로 가볍다."""
+    from paper_assistant.detail import list_papers as _list
+    return _list(*args, **kwargs)
+
+
 def get_paper_revisions(*args, **kwargs):
     """저자가 리뷰를 받고 무엇을 고쳤는지 (제목·초록·PDF 변경 이력).
 

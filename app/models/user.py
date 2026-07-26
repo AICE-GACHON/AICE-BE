@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, func
+from sqlalchemy import String, Integer, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,5 +20,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(500), nullable=False)
     nickname: Mapped[str] = mapped_column(String(50), nullable=False)
+    # refresh_token 폐기용 버전 카운터. 로그아웃 시 1 증가시켜, 그 이전에 발급된
+    # refresh_token(버전이 낮음)을 전부 무효화한다 (JWT는 상태가 없어 블랙리스트
+    # 없이는 개별 폐기가 불가능하므로, 버전 비교로 대신한다).
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

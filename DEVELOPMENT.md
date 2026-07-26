@@ -84,7 +84,9 @@ users ──< submissions                     papers ──< reviews ──< rev
 ```
 
 ### 서비스 테이블
-- **users**: 회원. 이메일/비밀번호 기반 인증.
+- **users**: 회원. 이메일/비밀번호 기반 인증. `token_version`은 refresh_token 폐기용
+  버전 카운터로, 로그아웃 시 증가시켜 그 이전에 발급된 refresh_token을 전부 무효화합니다
+  (`alembic/versions/0002_add_user_token_version.py`).
 - **submissions**: 사용자가 올린 내 논문 초안. 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
   결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
@@ -139,11 +141,19 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 | 도메인 | 메서드/경로 | 설명 | 인증 |
 |---|---|---|---|
 | Auth | `POST /api/auth/signup` | 회원가입 | - |
-| Auth | `POST /api/auth/login` | 로그인, JWT 발급 | - |
+| Auth | `POST /api/auth/login` | 로그인, access_token + refresh_token 발급 | - |
+| Auth | `POST /api/auth/refresh` | refresh_token으로 access_token 재발급 (refresh_token도 회전) | - |
+| Auth | `POST /api/auth/logout` | 로그아웃 (User.token_version 증가 → 이전 refresh_token 전부 무효화) | 필요 |
 | User | `GET /api/user/me` | 내 정보 조회 | 필요 |
+| User | `PATCH /api/user/me` | 내 정보 수정 (nickname) | 필요 |
+| User | `DELETE /api/user/me` | 회원 탈퇴 (submissions 이하 CASCADE 삭제) | 필요 |
 | Submission | `POST /api/submissions` | 내 논문 초안 업로드 | 필요 |
+| Submission | `GET /api/submissions` | 내 초안 목록 조회 | 필요 |
+| Submission | `GET /api/submissions/{id}` | 내 초안 상세 조회 | 필요 |
+| Submission | `DELETE /api/submissions/{id}` | 초안 삭제 (review_predictions 이하 CASCADE 삭제) | 필요 |
 | Feedback | `POST /api/submissions/{id}/analysis` | 분석 시작 → **202**, status=pending | 필요 |
 | Feedback | `GET /api/submissions/{id}/analysis` | 분석 상태/결과 조회 (폴링) | 필요 |
+| Paper | `GET /api/papers` | 코퍼스 논문 목록 (venue/year/field/q 필터, limit/offset 페이지네이션) | - |
 | Paper | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Paper | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
 | Review | `GET /api/reviews?paper_id=` | 특정 논문의 리뷰 목록 | - |
@@ -151,7 +161,12 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
 `similar_papers[].paper_id`를 그대로 넘기면 됩니다.
 
-기존 `POST /api/feedback/predictions`(501 반환)는 위 두 개로 대체돼 삭제됐습니다.
+기존 `POST /api/feedback/predictions`(501 반환)는 분석 시작/조회 두 개로 대체돼 삭제됐습니다.
+
+refresh_token은 JWT라 상태가 없어 개별 폐기가 불가능합니다. 대신 `users.token_version`
+(alembic `0002_add_user_token_version`)을 로그아웃 시 1 증가시키고, refresh_token 안에
+발급 시점의 버전을 담아 재발급 요청마다 비교합니다 — 어긋나면 거부합니다
+(`app/core/security.py`, `app/routers/auth.py`).
 
 ## 8. AI팀 연동 방식
 

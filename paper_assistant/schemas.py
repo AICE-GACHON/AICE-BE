@@ -105,6 +105,23 @@ class PaperDetail(BaseModel):
     review_points: list[ReviewPointDetail] = Field(default_factory=list)
 
 
+class PaperSummary(BaseModel):
+    """논문 목록 조회(list_papers) 1건. 상세는 get_paper_detail로 별도 조회한다."""
+    paper_id: int
+    openreview_id: str
+    title: str
+    venue: str
+    year: int
+    decision: str
+    primary_area: str | None = None
+
+
+class PaperListResponse(BaseModel):
+    """list_papers() 반환. total은 필터 적용 후 전체 건수(페이지네이션용)."""
+    total: int
+    items: list[PaperSummary] = Field(default_factory=list)
+
+
 class DiffSegment(BaseModel):
     """텍스트 변경의 단어 단위 조각. 프론트가 색만 입혀 그리면 된다."""
     op: str = Field(description="equal | insert | delete")

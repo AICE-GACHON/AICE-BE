@@ -9,8 +9,8 @@ AI 파트가 소유하고(scripts/init_db.sql), 조회도 paper_assistant.get_pa
 있고, 분석 결과(Report.similar_papers[].paper_id)도 이 id를 그대로 내려줍니다.
 """
 from paper_assistant.schemas import (
-    FieldChange, PaperDetail, PaperRevisions, ReviewDetail, ReviewPointDetail,
-    RevisionEntry,
+    FieldChange, PaperDetail, PaperListResponse, PaperRevisions, PaperSummary,
+    ReviewDetail, ReviewPointDetail, RevisionEntry,
 )
 
 # 백엔드 응답 이름으로 쓰는 별칭 (기존 PaperResponse 자리를 대체)
@@ -23,6 +23,8 @@ RevisionsResponse = PaperRevisions
 __all__ = [
     "PaperResponse",
     "PaperDetail",
+    "PaperListResponse",
+    "PaperSummary",
     "ReviewDetail",
     "ReviewPointDetail",
     "RevisionsResponse",
