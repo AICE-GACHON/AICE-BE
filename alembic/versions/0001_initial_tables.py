@@ -2,11 +2,31 @@
 
 Revision ID: 0001
 Revises:
-Create Date: 2026-07-21
+Create Date: 2026-07-21 (2026-07-26 AI 파트 통합으로 재작성)
 
-이 마이그레이션은 논문 평가 및 피드백 서비스에 필요한 7개 테이블을
-전부 생성합니다. 외래키(FK)가 참조하는 테이블이 먼저 만들어져야 하므로,
-순서가 중요합니다.
+이 마이그레이션은 **서비스 테이블만** 만듭니다.
+
+논문 코퍼스(papers / authors / reviews / review_points / venue_stats / …)는 여기서
+만들지 않습니다. AI 파트가 `scripts/init_db.sql`로 이미 만들어 43,515편을 적재해 둔
+테이블이고, pgvector·tsvector·GIN 인덱스처럼 alembic으로 표현하기 번거로운 것들이
+들어 있습니다. 같은 이름의 테이블을 alembic이 또 만들려 하면 충돌합니다.
+
+통합 전 버전과 달라진 점 (전부 의도된 변경):
+  - papers / reviews / revisions 테이블 제거
+      papers·reviews는 코퍼스 쪽이 정본입니다. revisions("리뷰 이후 어떻게 수정됐는지")는
+      OpenReview에서 수집한 데이터가 없어 채울 수가 없습니다. 대신 같은 논문의 재투고
+      흐름(ICLR reject → NeurIPS accept)을 코퍼스의 submission_links로 추적하고,
+      분석 결과의 resubmission_flows로 내려줍니다.
+  - similar_paper_matches.similarity_score 제거
+      논문별 유사도 점수는 만들 수 없습니다 (검색 상위 20편의 코사인 폭이 0.013이라
+      1위와 20위가 사실상 같은 값). rank + match_type으로 대체했습니다.
+  - review_predictions를 Report 저장용으로 재설계
+      predicted_points TEXT 하나로는 분석 결과(신뢰도·lift·학회 경향·점수 분포)를
+      담을 수 없어 report JSONB로 통째로 저장합니다. 분석이 백그라운드로 돌기 때문에
+      status/error 컬럼도 함께 둡니다.
+  - submissions.embedding 제거
+      임베딩은 분석 시점에 계산하고 저장하지 않습니다. 저장하려면 vector(768)이어야
+      하는데 TEXT로 두면 벡터 연산에 쓸 수 없습니다.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -27,103 +47,88 @@ def upgrade() -> None:
         sa.Column("email", sa.String(100), nullable=False, unique=True),
         sa.Column("password_hash", sa.String(500), nullable=False),
         sa.Column("nickname", sa.String(50), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
     )
 
-    # 2. papers - OpenReview에서 수집한 기존 논문 코퍼스, 독립 테이블
-    op.create_table(
-        "papers",
-        sa.Column("paper_id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("external_id", sa.String(100), nullable=False, unique=True),
-        sa.Column("title", sa.String(300), nullable=False),
-        sa.Column("abstract", sa.Text(), nullable=False),
-        sa.Column("venue", sa.String(100), nullable=False),
-        sa.Column("year", sa.Integer(), nullable=False),
-        sa.Column("field", sa.String(100)),
-        sa.Column("pdf_url", sa.String(500)),
-        # TODO: pgvector 확장 설치 후 sa.Text -> Vector(1536) 타입으로 교체
-        sa.Column("embedding", sa.Text()),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
-    )
-
-    # 3. reviews (FK -> papers)
-    op.create_table(
-        "reviews",
-        sa.Column("review_id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("paper_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("papers.paper_id"), nullable=False),
-        sa.Column("reviewer_label", sa.String(50), nullable=False),
-        sa.Column("rating", sa.Integer()),
-        sa.Column("confidence", sa.Integer()),
-        sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("decision", sa.String(30)),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
-    )
-
-    # 4. revisions (FK -> papers)
-    op.create_table(
-        "revisions",
-        sa.Column("revision_id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("paper_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("papers.paper_id"), nullable=False),
-        sa.Column("version_number", sa.Integer(), nullable=False),
-        sa.Column("change_summary", sa.Text()),
-        sa.Column("content", sa.Text()),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
-    )
-
-    # 5. submissions (FK -> users)
+    # 2. submissions - 사용자가 올린 내 논문 초안 (FK -> users)
     op.create_table(
         "submissions",
         sa.Column("submission_id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.user_id"), nullable=False),
+        sa.Column(
+            "user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.user_id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("title", sa.String(300), nullable=False),
         sa.Column("abstract", sa.Text(), nullable=False),
         sa.Column("content", sa.Text()),
         sa.Column("field", sa.String(100)),
-        # TODO: pgvector 확장 설치 후 sa.Text -> Vector(1536) 타입으로 교체
-        sa.Column("embedding", sa.Text()),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
     )
+    op.create_index("submissions_user", "submissions", ["user_id"])
 
-    # 6. similar_paper_matches (FK -> submissions, papers)
-    op.create_table(
-        "similar_paper_matches",
-        sa.Column("match_id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "submission_id",
-            postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("submissions.submission_id"),
-            nullable=False,
-        ),
-        sa.Column("paper_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("papers.paper_id"), nullable=False),
-        sa.Column("similarity_score", sa.Numeric(5, 4), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
-    )
-
-    # 7. review_predictions (FK -> submissions)
+    # 3. review_predictions - 분석 1회분. 백그라운드 작업의 상태이자 결과 저장소.
     op.create_table(
         "review_predictions",
         sa.Column("prediction_id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column(
             "submission_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("submissions.submission_id"),
+            sa.ForeignKey("submissions.submission_id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column("predicted_points", sa.Text(), nullable=False),
-        sa.Column("suggested_revision", sa.Text()),
-        sa.Column("based_on_matches", sa.JSON()),
-        sa.Column("explanation_source", sa.String(20), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
+        # pending -> running -> done | failed
+        sa.Column("status", sa.String(20), nullable=False, server_default="pending"),
+        # paper_assistant.schemas.Report 전체. AI 파트가 Report 필드를 늘려도
+        # 마이그레이션 없이 그대로 담긴다.
+        sa.Column("report", postgresql.JSONB()),
+        # 아래 둘은 report 안에도 있지만, 목록 조회에서 매번 JSONB를 파싱하지 않도록
+        # 꺼내 둔 사본이다. strong | moderate | weak
+        sa.Column("confidence_level", sa.String(20)),
+        sa.Column("is_reliable", sa.Boolean()),
+        # "이 결과가 어떻게 만들어졌는지"를 항상 응답에 붙이기 위한 값.
+        # stub = LLM 없이 규칙/통계만 (기본, $0), llm = Haiku/Sonnet 실제 호출
+        sa.Column("explanation_source", sa.String(20), nullable=False, server_default="stub"),
+        sa.Column("error", sa.Text()),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("completed_at", sa.DateTime()),
     )
+    op.create_index(
+        "review_predictions_submission",
+        "review_predictions",
+        ["submission_id", "created_at"],
+    )
+
+    # 4. similar_paper_matches - 이 분석이 근거로 삼은 유사 논문 목록.
+    #    "이 예측이 어떤 논문을 보고 나왔는지"를 역방향으로도 조회할 수 있게 남긴다.
+    op.create_table(
+        "similar_paper_matches",
+        sa.Column("match_id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column(
+            "prediction_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("review_predictions.prediction_id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        # 코퍼스 papers.id (BIGINT). FK 제약은 걸지 않는다 — 코퍼스 테이블은
+        # init_db.sql이 관리해서 이 마이그레이션 시점에 존재를 보장할 수 없다.
+        sa.Column("paper_id", sa.BigInteger(), nullable=False),
+        sa.Column("rank", sa.Integer(), nullable=False),
+        # both(의미+용어) | semantic(의미만) | lexical(용어만) — 왜 걸렸는지의 근거
+        sa.Column("match_type", sa.String(20), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index(
+        "similar_paper_matches_prediction", "similar_paper_matches", ["prediction_id", "rank"]
+    )
+    op.create_index("similar_paper_matches_paper", "similar_paper_matches", ["paper_id"])
 
 
 def downgrade() -> None:
     # 만들 때의 역순으로 삭제 (FK 참조 관계 때문에 순서 중요)
-    op.drop_table("review_predictions")
     op.drop_table("similar_paper_matches")
+    op.drop_table("review_predictions")
     op.drop_table("submissions")
-    op.drop_table("revisions")
-    op.drop_table("reviews")
-    op.drop_table("papers")
     op.drop_table("users")

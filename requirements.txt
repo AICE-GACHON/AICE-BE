@@ -1,9 +1,10 @@
+# ---------------------------------------------------------------- 웹/API
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 sqlalchemy==2.0.35
 alembic==1.13.3
-psycopg2-binary==2.9.9
-pydantic==2.9.2
+# langgraph/anthropic이 요구하는 하한과 부딪히지 않도록 == 대신 >= 로 둔다.
+pydantic>=2.9.2
 pydantic-settings==2.5.2
 email-validator==2.2.0
 python-dotenv==1.0.1
@@ -11,4 +12,33 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1  # passlib 1.7.4는 bcrypt>=4.1(__about__ 제거)과 호환 안 됨
 python-multipart==0.0.12
-openreview-py==2.3.1
+
+# ---------------------------------------------------------------- DB
+# 드라이버는 psycopg3 하나로 통일한다. AI 파트가 pgvector 어댑터(register_vector)와
+# 커넥션 풀에 psycopg3을 쓰므로, SQLAlchemy도 postgresql+psycopg 방언으로 같은
+# 드라이버를 쓴다 (app/database.py에서 URL 스킴을 붙여준다).
+# psycopg2-binary는 제거했다 — 2.9.9에 Python 3.13 휠이 없다(2.9.10부터 제공).
+psycopg[binary,pool]>=3.2
+pgvector>=0.3
+
+# ---------------------------------------------------------------- AI 수집 배치
+# 코퍼스는 이미 적재돼 있어 서버 운영에는 불필요하지만, 재수집 스크립트가 쓴다.
+# OpenReview는 openreview-py 대신 requests 기반 자체 클라이언트를 쓴다
+# (v1/v2 API 분기와 재시도 정책을 직접 제어해야 해서). 그래서 openreview-py는 제거.
+requests>=2.32
+pyjwt>=2.8           # 캐시된 OpenReview 로그인 토큰 만료 검사
+pymupdf>=1.24        # PDF 텍스트 추출 (span 폰트 크기로 제목/저자 구분)
+
+# ---------------------------------------------------------------- 임베딩
+# CPU 빌드로 충분하다 (43,515편 전체 임베딩에 CPU로 약 0.8시간, GPU 불필요).
+# CPU 휠 설치: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.9
+transformers>=4.57
+adapters>=1.3        # SPECTER2는 base 모델 + adapter 구조
+
+# ---------------------------------------------------------------- 분석 파이프라인
+langgraph>=1.0
+anthropic>=0.60      # 쿼리 시점 태깅/종합 (PAPER_ASSISTANT_USE_LLM=0이면 미사용)
+
+# ---------------------------------------------------------------- 테스트
+pytest>=8.0
