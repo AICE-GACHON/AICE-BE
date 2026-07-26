@@ -11,15 +11,41 @@ from alembic import context
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import settings  # noqa: E402
-from app.database import Base  # noqa: E402
+from app.database import Base, sqlalchemy_url  # noqa: E402
 import app.models  # noqa: E402,F401  # 모든 모델을 등록하기 위해 import만 해줌
+
+# AI 파트가 scripts/init_db.sql로 관리하는 논문 코퍼스 테이블.
+# 같은 DB에 있지만 app/models에는 없으므로, 이 목록을 걸러주지 않으면
+# autogenerate가 "모델에 없는 테이블"로 보고 전부 DROP하는 마이그레이션을 만든다.
+CORPUS_TABLES = {
+    "papers",
+    "authors",
+    "paper_authors",
+    "reviews",
+    "review_points",
+    "aspect_base_rates",
+    "venue_stats",
+    "citations",
+    "submission_links",
+    "ingest_status",
+}
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    """코퍼스 테이블(과 그 인덱스)은 alembic의 관리 대상에서 제외한다."""
+    if type_ == "table":
+        return name not in CORPUS_TABLES
+    if type_ == "index" and obj.table is not None:
+        return obj.table.name not in CORPUS_TABLES
+    return True
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-# .env에서 읽어온 DB 주소를 alembic 설정에 주입
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# .env에서 읽어온 DB 주소를 alembic 설정에 주입.
+# app/database.py와 같은 함수를 써서 psycopg3 방언(postgresql+psycopg)으로 맞춘다.
+config.set_main_option("sqlalchemy.url", sqlalchemy_url(settings.DATABASE_URL))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -53,6 +79,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -74,7 +101,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():
