@@ -163,6 +163,44 @@ class PaperRevisions(BaseModel):
     revisions: list[RevisionEntry] = Field(default_factory=list)
 
 
+class ReviewExample(BaseModel):
+    """패턴을 대표하는 실제 리뷰 지적 문장 1건.
+
+    문자열이 아니라 출처를 함께 담는다 — 요약문의 인용 표기가 이 문장으로
+    역추적되어야 하기 때문이다 (graph/evidence.py).
+    """
+    text: str
+    paper_id: int = Field(description="이 지적을 받은 코퍼스 논문 id")
+    review_point_id: int | None = Field(
+        default=None, description="review_points.id. 근거 추적의 최소 단위")
+    from_unsplit_review: bool = Field(
+        default=False,
+        description="강/약점 미분리 리뷰에서 나온 문장. 참이면 '지적'이라 단정 금지 "
+                    "(대표 문장 선정에서 이미 뒤로 밀리지만, 다른 후보가 없으면 뽑힌다)")
+
+
+class EvidenceItem(BaseModel):
+    """요약이 인용할 수 있는 근거 1건 (검색된 원문).
+
+    `Report.summary_markdown`의 `[E1]` / `[M1]` 표기가 여기 label을 가리킨다.
+    풀에 없는 라벨은 생성 직후 제거되므로, 화면에 남은 인용은 전부 실제
+    리뷰·메타리뷰 원문으로 **역추적된다**.
+
+    ⚠️ 역추적이 가능하다는 것이지, 그 원문이 인용한 문장을 **뒷받침한다**는
+    보장은 아니다. 검증은 라벨의 실재만 확인한다 (graph/evidence.py 참고).
+    """
+    label: str = Field(description="E1, M1 … 요약문에서 참조하는 키")
+    kind: str = Field(description="review_point(리뷰 지적) | meta_review(AC 총평)")
+    text: str
+    paper_id: int
+    paper_title: str = ""
+    review_point_id: int | None = None
+    aspect: str | None = Field(default=None, description="review_point일 때")
+    decision: str | None = Field(default=None, description="meta_review일 때")
+    from_unsplit_review: bool = Field(
+        default=False, description="미분리 리뷰 출처 — '지적'이라 단정 금지")
+
+
 class ReviewPattern(BaseModel):
     """유사 논문들에서 반복 등장하는 지적 패턴.
 
@@ -174,7 +212,9 @@ class ReviewPattern(BaseModel):
     aspect: str = Field(description="통제된 분류 또는 'other'")
     paper_count: int = Field(description="이 지적을 받은 유사 논문 수")
     total_papers: int = Field(description="분석 대상 유사 논문 총수")
-    examples: list[str] = Field(default_factory=list, description="지적 문장 예시")
+    examples: list[ReviewExample] = Field(
+        default_factory=list,
+        description="서로 다른 논문에서 뽑은 대표 지적 문장 (출처 id 포함)")
 
     # --- base rate 대비 두드러짐 (base_rates 미제공 시 None) ---
     base_rate: float | None = Field(
@@ -277,8 +317,20 @@ class Report(BaseModel):
     venue_trends: list[VenueTrend] = Field(default_factory=list)
     rating_context: RatingContext = Field(default_factory=lambda: RatingContext())
     resubmission_flows: list[ResubmissionFlow] = Field(default_factory=list)
+
+    # --- 근거 추적 (RAG) ---
+    evidence: list[EvidenceItem] = Field(
+        default_factory=list,
+        description="요약이 인용할 수 있는 검색된 원문 풀. LLM을 끄더라도 채워지므로 "
+                    "프론트는 항상 '이 결론의 출처' 목록을 보여줄 수 있다.")
+    citations: list[str] = Field(
+        default_factory=list,
+        description="summary_markdown이 실제로 인용한 라벨. 풀에 없는 라벨은 "
+                    "생성 직후 제거되므로 여기 남은 것은 전부 유효하다.")
+
     summary_markdown: str = Field(
-        default="", description="사람이 읽는 종합 요약")
+        default="",
+        description="사람이 읽는 종합 요약. [E1]/[M1] 표기는 evidence의 label을 가리킨다")
     used_llm: bool = Field(
         default=False,
         description="이 리포트가 실제 LLM 호출로 만들어졌는지. False면 태깅·요약이 "

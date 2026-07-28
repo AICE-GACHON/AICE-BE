@@ -39,6 +39,8 @@ class SearchResult:
     """원시 코사인. **사용자에게 절대 노출 금지** — 쿼리 단위 신뢰도 판정에만 쓴다."""
     match_type: str
     """both(의미+용어) / semantic(의미만) / lexical(용어만). 왜 걸렸는지의 $0 근거."""
+    meta_review: str | None = None
+    """AC 총평. 개별 리뷰보다 신호가 강해 종합 단계에서 근거로 인용한다."""
 
 
 def _vector_search(cur, embedding, limit: int) -> list[tuple[int, float]]:
@@ -102,9 +104,12 @@ def rrf_fuse(*rank_maps: dict[int, int], k: int = RRF_K) -> dict[int, float]:
 def _fetch_metadata(cur, paper_ids: list[int]) -> dict[int, tuple]:
     if not paper_ids:
         return {}
+    # meta_review(AC 총평)는 종합 단계에서 근거로 인용한다. 전문은 길어서
+    # 여기서 잘라 온다 — 어차피 프롬프트에 넣을 땐 더 줄인다(graph/evidence.py).
     cur.execute(
         """
-        SELECT id, openreview_id, title, abstract, venue, year, decision
+        SELECT id, openreview_id, title, abstract, venue, year, decision,
+               left(meta_review, 2000)
         FROM papers WHERE id = ANY(%s)
         """,
         (paper_ids,),
@@ -135,7 +140,8 @@ def hybrid_search(embedding, query_text: str, top_k: int = 20,
     for pid, score in ranked:
         if pid not in meta:
             continue
-        openreview_id, title, abstract, venue, year, decision = meta[pid]
+        (openreview_id, title, abstract, venue, year, decision,
+         meta_review) = meta[pid]
         results.append(SearchResult(
             paper_id=pid,
             openreview_id=openreview_id,
@@ -149,6 +155,7 @@ def hybrid_search(embedding, query_text: str, top_k: int = 20,
             fts_rank=fts_ranks.get(pid),
             cosine=cosines.get(pid),
             match_type=match_type(vector_ranks.get(pid), fts_ranks.get(pid)),
+            meta_review=meta_review,
         ))
     return results
 

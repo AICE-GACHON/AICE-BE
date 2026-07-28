@@ -214,7 +214,9 @@ revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 
 | `venue_trends` | 학회별 게재 경향 (`is_coverage_biased` 확인 필수) |
 | `rating_context` | 이웃 논문 점수 분포와 당락 경계 추정 |
 | `resubmission_flows` | A학회 reject → B학회 accept 흐름 |
-| `summary_markdown` | 사람이 읽는 종합 요약 |
+| `summary_markdown` | 사람이 읽는 종합 요약. `[E1]`/`[M1]`은 아래 evidence를 가리킴 |
+| `evidence` | 인용 가능한 **검색된 원문** — 리뷰 지적 문장(E*) + AC 메타리뷰(M*) |
+| `citations` | 요약이 실제로 인용한 라벨. 지어낸 라벨은 제거되므로 링크는 유효하다 (원문이 그 주장을 뒷받침하는지까지는 미검증) |
 | `used_llm` | 이 리포트가 실제 LLM 호출로 만들어졌는지 (근거 추적용) |
 
 ## 9. 브랜치 전략

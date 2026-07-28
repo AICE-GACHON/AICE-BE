@@ -136,7 +136,9 @@ DB는 이미 43,515편 + 리뷰 168,217건 + 지적항목 125만 건 적재 완�
 | `venue_trends` | 학회별 게재 경향 | `is_coverage_biased`면 accept율 절대 수치 숨기고 `accept_lift`만 (4.4) |
 | `rating_context` | 이웃 논문들 점수 분포·당락 경계 | 원점수 아니라 상대값 필드 사용 (4.4) |
 | `resubmission_flows` | A학회 reject → B학회 accept 흐름 | 그대로 표시 가능 |
-| `summary_markdown` | 사람이 읽는 종합 요약 (마크다운) | 그대로 렌더링 |
+| `summary_markdown` | 사람이 읽는 종합 요약 (마크다운) | 그대로 렌더링. `[E1]`/`[M1]` 표기는 `evidence`의 label |
+| `evidence` | 요약이 인용한 **실제 리뷰·메타리뷰 원문** | `citations`에 있는 라벨만 골라 각주로 보여주면 된다. `from_unsplit_review=true`면 '지적'이라 단정 금지 |
+| `citations` | 실제로 인용된 라벨 목록 | 지어낸 라벨은 걸러졌으므로 **링크는 항상 유효**하다. 다만 문장이 그 원문에서 나온 내용인지까지는 검증되지 않으니, 원문을 함께 보여줘 사용자가 판단하게 할 것 |
 | `used_llm` | 이 리포트가 실제 LLM 호출로 나왔는지 | 근거 추적용. `false`면 태깅·요약이 스텁이다 |
 
 데모 화면(`demo/`)이 이 계약을 그대로 쓰는 참고 구현이다 — `demo/server.py`,

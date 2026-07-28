@@ -48,6 +48,22 @@ def test_aggregate_examples_from_distinct_papers():
     examples = patterns[0].examples
     # 서로 다른 논문에서 예시를 뽑아야 함 (논문1 하나 + 논문2 하나)
     assert len(examples) == 2
+    assert {e.paper_id for e in examples} == {1, 2}
+
+
+def test_examples_carry_source_point_id():
+    """근거 추적의 최소 단위. 없으면 요약의 인용을 원문까지 되짚을 수 없다."""
+    points = [{"point_id": 777, "paper_id": 1, "aspect": "clarity",
+               "text": "notation is inconsistent across sections"}]
+    patterns = aggregate_by_aspect(points, total_papers=1, min_papers=1)
+    assert patterns[0].examples[0].review_point_id == 777
+
+
+def test_examples_tolerate_missing_point_id():
+    """point_id 없이 부르는 경로(테스트/폴백)도 깨지지 않아야 한다."""
+    patterns = aggregate_by_aspect([_pt(1, "clarity", "unclear notation here")],
+                                   total_papers=1, min_papers=1)
+    assert patterns[0].examples[0].review_point_id is None
 
 
 # ---------------------------------------------------------- 통계 유틸
@@ -205,3 +221,30 @@ def test_papers_without_any_criticism_stay_in_denominator():
     patterns = aggregate_by_aspect(
         points, total_papers=4, decisions=_decisions({2, 3}, {0, 1}))
     assert patterns[0].decided_without == 0
+
+
+def test_split_format_reviews_are_preferred_as_examples():
+    """미분리 리뷰 문장은 대표 '지적'으로 뽑히면 안 된다.
+
+    미분리 리뷰(2023년 이전)는 본문 전체가 weakness로 라벨링돼 있어 요약·칭찬이
+    섞인다. 길이만으로 고르면 "This paper proposes ..." 같은 요약문이 지적으로
+    인용된다(실측). 집계 수치는 그대로 두고 인용 문장만 신뢰할 수 있는 쪽을 쓴다.
+    """
+    points = [
+        {"point_id": 1, "paper_id": 1, "aspect": "baselines",
+         "text": "This paper proposes a very long summary sentence " * 5,
+         "from_unsplit": True},
+        {"point_id": 2, "paper_id": 2, "aspect": "baselines",
+         "text": "only two baselines compared", "from_unsplit": False},
+    ]
+    patterns = aggregate_by_aspect(points, total_papers=2, min_papers=1)
+    first = patterns[0].examples[0]
+    assert first.review_point_id == 2          # 짧아도 분리 포맷이 먼저
+    assert first.from_unsplit_review is False
+
+
+def test_unsplit_example_is_used_when_nothing_else_exists_but_is_flagged():
+    points = [{"point_id": 9, "paper_id": 1, "aspect": "clarity",
+               "text": "the whole review body", "from_unsplit": True}]
+    patterns = aggregate_by_aspect(points, total_papers=1, min_papers=1)
+    assert patterns[0].examples[0].from_unsplit_review is True

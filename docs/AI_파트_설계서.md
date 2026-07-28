@@ -1044,3 +1044,110 @@ lift 기준 강조)이 화면에서 어떻게 보여야 하는지 알려주지 �
   읽었다.
 - `aspect_base_rates` / `venue_stats`의 `CREATE TABLE`이 `init_db.sql`과 배치 스크립트
   양쪽에 있었다. 스키마 소유자는 `init_db.sql` 하나로 정리.
+
+
+## 23. 근거 추적 도입 — 검색된 원문을 생성 컨텍스트로 (2026-07-26)
+
+### 23.1 문제
+
+"이거 RAG 맞나?"라는 질문에서 출발했다. 코드를 보면 답은 **아니오에 가까웠다.**
+
+`USE_LLM=0`(기본)에서는 생성 자체가 없다. 켜도 Sonnet에 들어가는 건 lift·p값·
+accept율 같은 **집계 숫자**뿐이고, 리뷰 본문 96만 건은 단 한 글자도 가지 않았다.
+`aggregate_by_aspect`가 aspect마다 대표 문장 3개를 뽑아 `ReviewPattern.examples`에
+담고 있었는데, **프론트에는 내려가면서 프롬프트에는 안 들어갔다.**
+
+### 23.2 한 것
+
+1. **`examples`를 프롬프트에 넣었다** (`facts["evidence"]`).
+   검색된 리뷰 문장이 생성 컨텍스트에 실제로 들어가므로 정의상 RAG가 성립한다.
+2. **메타리뷰를 파이프라인에 편입했다.** `papers.meta_review`는 그동안 조회 API로만
+   나가고 분석에는 안 쓰였다. AC의 최종 판단이라 개별 리뷰보다 신호가 강하고
+   논문당 1건뿐이라 컨텍스트에 넣기도 좋다. `hybrid_search`가 같이 읽어 온다.
+3. **인용을 검증한다.** `graph/evidence.py`의 `validate_citations()`가 모델이 쓴
+   `[E1]`을 근거 풀과 대조해 없는 라벨을 지운다. 이게 없으면 "인용해 달라"는
+   부탁일 뿐이고, `[E9]`를 지어내도 화면에는 근거가 달린 것처럼 보인다.
+4. **`examples`에 출처를 실었다.** `list[str]` → `list[ReviewExample]`
+   (`review_point_id` 포함). 인용을 `review_points.id`까지 되짚을 수 있어야
+   근거 추적이 성립한다.
+
+통계는 그대로 뒀다. 원문만 넣고 lift/Fisher를 빼면 §18에서 실측한 문제
+(코퍼스 상수를 발견처럼 쓰는 것)가 그대로 재발한다. **원문을 추가하되 통계를
+가드레일로 남기는 것**이 핵심이다.
+
+### 23.3 대표 문장 선정을 고쳐야 했다 (실측)
+
+붙이자마자 인용 품질이 드러났다. GNN 쿼리로 뽑은 근거 10건 중 절반이
+지적이 아니었다.
+
+```
+[E3] experimental_scale — "It is based on strong and reliable previous results,
+                           which makes it a robust model."        ← 칭찬
+[E6] baselines          — "**Summary** This paper proposes ForceNet …"  ← 요약
+[E7] significance       — "The paper propose a neural network force field …" ← 요약
+```
+
+원인은 미분리 리뷰(§11, 코퍼스의 37%)다. 본문 전체가 weakness로 라벨링돼 있는데
+대표 문장을 **길이순**으로 골랐더니 요약 단락이 1등으로 올라왔다. 통계에서는
+감수했던 한계지만(분모 정의를 base rate와 맞춰야 한다), 원문을 인용하기 시작하면
+그대로 노출된다.
+
+수정: 대표 문장 정렬 키를 `(from_unsplit, -len)`으로 바꿔 **분리 포맷 리뷰를
+먼저** 쓴다. 집계 수치는 건드리지 않는다. 같은 쿼리에서 미분리 출처가
+10건 중 **0건**이 됐고, 뽑힌 문장은 전부 실제 지적이었다.
+
+    [E5] baselines  — "My primary concern stems from the experimental setup's
+                       consistency. The baseline methods used for comparison…"
+    [E9] clarity    — "Section 5 (method) is too condensed to present a clear
+                       picture of how the proposed…"
+
+다른 후보가 없어 미분리 문장이 뽑히면 `from_unsplit_review=true`로 표시해 내려간다.
+
+### 23.4 부수 효과 — DB가 죽었을 때 30초씩 멈추던 문제
+
+근거 테스트를 붙이면서 노드 단위 테스트가 191초로 늘었다. 원인은 커넥션 풀이었다.
+`ConnectionPool`의 기본 대기가 30초라, 컨테이너가 내려간 상태에서
+`load_venue_stats()` 한 번에 30초를 버렸다. 운영에서도 DB가 흔들리면 분석 요청
+하나가 그만큼 멈춘다는 뜻이다.
+
+풀에 `timeout=5`, `connect_timeout=5`를 줘서 빨리 포기하게 했고, 노드 테스트는
+통계 로더를 스텁으로 바꿔 DB를 아예 타지 않게 했다(191초 → 0.7초). 통계 유무에
+따라 검증 대상이 달라지던 비결정성도 같이 없앴다.
+
+### 23.5 검증의 한계 — 실측으로 드러난 것
+
+토글을 켜고 실제 Sonnet 출력을 받아보니 인용 검증이 잡지 못하는 실패 모드가 있었다.
+요약이 이렇게 썼다.
+
+> "실제로 GemNet 계열 등 우수 사례는 명확한 동기 제시가 **강점**으로 꼽힙니다[E4]."
+
+`E4`는 **다른 논문**(On the Scalability of GNNs)의 **실험 규모 비판**이다
+(`review_points.id=1185158`, "pre-training data consists of only 5 million
+molecules ... insufficient"). 라벨이 실재하므로 `validate_citations()`를 통과했지만,
+문장은 그 원문이 말하지 않는 내용이다.
+
+즉 이 검증이 보장하는 것은 **"인용이 실제 원문으로 역추적된다"**까지이고,
+**"그 원문이 그 주장을 뒷받침한다"**는 아니다. 지어낸 라벨은 막지만, 실재하는
+라벨을 엉뚱한 문장에 붙이는 것은 막지 못한다.
+
+덧붙여 근거 풀에는 strength 항목이 **하나도 없다** — 추출기가 weakness와 question만
+만들기 때문이다(§11). 따라서 요약의 모든 '강점' 주장은 구조적으로 근거가 없다.
+
+완화책으로 프롬프트에 두 줄을 넣었다: (1) 인용은 그 항목의 원문이 그 항목의 논문에
+대해 말하는 내용만 뒷받침한다, (2) 근거 풀에 강점은 없으니 강점 주장에 인용을 붙이지
+말라. 근본 해결은 인용 문장과 원문을 대조하는 **별도 검증 단계**이고, 그건 LLM 호출이
+한 번 더 들어간다.
+
+프론트는 그때까지 인용을 '검증된 사실'로 표시하지 말고 원문을 함께 펼쳐
+사용자가 대조하게 해야 한다.
+
+### 23.6 남은 것
+
+검색 단위는 여전히 **논문**이다(title+abstract 벡터 1개). `review_points.embedding
+vector(768)` 컬럼이 있지만 값을 쓰는 코드 경로가 아예 없어 전부 NULL이다.
+채우면 "쿼리 초록과 가장 가까운 지적 문장"을 논문 20편이라는 틀 밖에서 직접
+검색할 수 있다 — 진짜 2단계 RAG.
+
+⚠️ SPECTER2로 채우면 안 된다. §14 실측대로 짧은 리뷰 문장 유사도가 0.872에
+압축돼 변별이 안 된다. 문장용 모델(`bge-small`, `all-MiniLM` 등)이 따로 필요하고
+차원이 달라 컬럼 정의도 바꿔야 한다. weakness 96만 건 CPU 임베딩에 몇 시간.

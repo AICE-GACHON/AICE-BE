@@ -461,7 +461,7 @@ function render(d) {
     // 당락 대조는 유의할 때만 단정한다. 표본이 작으면(이웃 20편 중 4편 등) 노이즈다.
     if (p.is_contrast_significant)
       h += `<div class="ex risk">이 지적을 받은 ${p.decided_with}편 중 ${p.accept_with}편만 통과(${(100*p.accept_rate_with).toFixed(0)}%) · 지적이 없던 ${p.decided_without}편은 ${(100*p.accept_rate_without).toFixed(0)}% 통과</div>`;
-    if (p.examples && p.examples[0]) h += `<div class="ex">예: ${esc(p.examples[0])}</div>`;
+    if (p.examples && p.examples[0]) h += `<div class="ex">예: ${esc(p.examples[0].text)}</div>`;
   }
   h += `</div>`;
 
@@ -488,7 +488,21 @@ function render(d) {
   h += `</div>`;
 
   // 종합 요약
-  if (d.summary_markdown) h += `<div class="card"><div class="sec-title">📝 종합</div><div class="summary">${esc(d.summary_markdown)}</div></div>`;
+  if (d.summary_markdown) {
+    h += `<div class="card"><div class="sec-title">📝 종합</div><div class="summary">${esc(d.summary_markdown)}</div>`;
+    // 근거 추적: 요약이 인용한 [E1]/[M1]이 실제 어떤 문장인지 펼쳐 보여준다.
+    // 검증을 통과한 라벨만 citations에 남으므로 여기 있는 건 전부 실재하는 원문이다.
+    const cited = (d.citations || []);
+    const pool = (d.evidence || []).filter(e => cited.includes(e.label));
+    if (pool.length) {
+      h += `<div class="sec-title" style="margin-top:14px">🔗 인용된 근거</div>`;
+      for (const e of pool) {
+        const kind = e.kind === 'meta_review' ? 'AC 총평' : '리뷰 지적';
+        h += `<div class="ex"><b>[${esc(e.label)}]</b> <span class="muted">${kind} · ${esc(e.paper_title)}</span><br>${esc(e.text)}</div>`;
+      }
+    }
+    h += `</div>`;
+  }
 
   return h;
 }
