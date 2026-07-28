@@ -1,41 +1,47 @@
+"""백엔드 설정.
+
+여기에는 **백엔드 전용 값만** 선언한다. DB 주소와 LLM 토글처럼 AI 파트와 공유하는
+값은 `paper_assistant.config`가 단일 소스이고, 아래에서 그대로 읽어 쓴다 —
+같은 키를 두 곳에 선언하면 한쪽만 고쳤을 때 조용히 다른 DB를 보게 된다.
+"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from paper_assistant import config as shared
 
 
 class Settings(BaseSettings):
+    """.env에서 값을 읽어오는 설정 클래스.
+
+    extra="ignore": .env에는 AI 파트가 읽는 키(S2_API_KEY, OPENREVIEW_* 등)도 함께
+    들어 있다. 여기 선언되지 않은 키가 있다고 서버 기동이 실패하면 안 된다.
     """
-    .env 파일에서 값을 읽어오는 설정 클래스.
-    실제 값은 .env 파일에 넣고, 이 파일에는 "어떤 값이 필요한지"만 정의합니다.
-    """
-    # extra="ignore": .env에는 AI 파트가 직접 읽는 키(S2_API_KEY, ANTHROPIC_API_KEY,
-    # PAPER_ASSISTANT_USE_LLM)도 함께 들어 있다. 여기 선언되지 않은 키가 있다고
-    # 서버 기동이 실패하면 안 되므로 무시한다.
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # 백엔드와 AI 파트가 공유하는 단일 DB. pgvector가 설치된 인스턴스여야 한다
-    # (docker-compose.yml이 띄우는 5433 포트). 자세한 내용은 .env.example 참고.
-    DATABASE_URL: str
-
-    # 프론트엔드 개발 서버 주소들 (콤마로 구분). 배포 시 실제 프론트 도메인으로 교체.
+    # 프론트엔드 개발 서버 주소들. 배포 시 실제 프론트 도메인으로 교체.
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
 
-    # OpenReview 계정 — 논문 코퍼스 재수집 배치(scripts/, paper_assistant/ingest/)에서만
-    # 쓴다. 코퍼스는 이미 적재돼 있어 서버 운영에는 비어 있어도 된다.
-    # 실제로 이 값을 읽는 쪽은 paper_assistant/config.py다.
-    OPENREVIEW_USERNAME: str = ""
-    OPENREVIEW_PASSWORD: str = ""
+    # 기동 시 SPECTER2를 미리 로드할지. 켜면 첫 분석이 빨라지지만 매 기동이
+    # 수십 초 느려진다 — 로컬 개발/테스트에서는 꺼두는 편이 낫다.
+    WARMUP_ON_STARTUP: bool = False
 
-    # True면 분석 시 실제 LLM(Haiku 추출 + Sonnet 종합)을 호출하고, False면 결정론적
-    # 스텁으로 돌아 비용이 0입니다. 기본은 off — 켜기 전에 팀 예산을 확인하세요.
-    # paper_assistant도 같은 환경변수를 읽지만, 백엔드는 이 값을 analyze()에 명시적으로
-    # 넘겨서 "이 결과가 LLM으로 만들어졌는지"(explanation_source)를 정확히 기록합니다.
-    PAPER_ASSISTANT_USE_LLM: bool = False
+    # --- AI 파트와 공유하는 값 (선언은 paper_assistant/config.py 한 곳뿐) ---
+
+    @property
+    def DATABASE_URL(self) -> str:
+        """백엔드와 AI 파트가 함께 쓰는 단일 DB. pgvector가 설치된 인스턴스여야 한다
+        (docker-compose.yml이 띄우는 5433 포트). 자세한 내용은 .env.example 참고."""
+        return shared.DATABASE_URL
+
+    @property
+    def USE_LLM(self) -> bool:
+        """분석 시 실제 LLM을 호출할지. 기본 off($0)."""
+        return shared.USE_LLM
 
 
 settings = Settings()

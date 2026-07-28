@@ -1,5 +1,0 @@
-# 데모 웹 서버 전용 의존성 (demo/ 폴더를 지우면 이것들도 불필요).
-# AI 파트(paper_assistant)의 requirements.txt가 먼저 설치돼 있어야 한다.
-fastapi>=0.110
-uvicorn[standard]>=0.29
-python-multipart>=0.0.9

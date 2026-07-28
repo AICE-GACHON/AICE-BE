@@ -9,7 +9,7 @@
 미분리 리뷰(needs_llm_split)만 건드린다 — 분리 포맷 리뷰의 항목은 그대로 둔다.
 실행 후 base rate가 바뀌므로 scripts/build_base_rates.py를 다시 돌릴 것.
 
-    $env:PYTHONPATH="."; python scripts/reextract_unsplit.py [--dry-run]
+    python scripts/reextract_unsplit.py [--dry-run]
 """
 import argparse
 import logging

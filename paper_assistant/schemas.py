@@ -278,4 +278,8 @@ class Report(BaseModel):
     rating_context: RatingContext = Field(default_factory=lambda: RatingContext())
     resubmission_flows: list[ResubmissionFlow] = Field(default_factory=list)
     summary_markdown: str = Field(
-        default="", description="사람이 읽는 종합 요약 (LLM 생성)")
+        default="", description="사람이 읽는 종합 요약")
+    used_llm: bool = Field(
+        default=False,
+        description="이 리포트가 실제 LLM 호출로 만들어졌는지. False면 태깅·요약이 "
+                    "결정론적 스텁이다. 근거 추적용 — 설정값이 아니라 실행 결과다.")

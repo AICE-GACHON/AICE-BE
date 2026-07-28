@@ -12,7 +12,7 @@ rating은 코퍼스에 168,217건 100% 커버리지로 있으면서 여태 Repor
 
 DB를 모르는 순수 함수라 테스트가 쉽다 — 조회는 nodes.py가 한다.
 """
-from paper_assistant.graph.venue_stats import VenueStat
+from paper_assistant.db.stats import VenueStat
 from paper_assistant.schemas import RatingContext
 
 # 리뷰어 의견이 '갈렸다'고 볼 점수 차이 (10점 척도에서 4점 이상은 확연한 대립)

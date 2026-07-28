@@ -32,6 +32,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 from paper_assistant import config
+from paper_assistant.ingest._http import new_session, request_with_retry
 
 OAI_URL = "http://export.arxiv.org/oai2"
 ATOM_URL = "http://export.arxiv.org/api/query"
@@ -56,36 +57,35 @@ log = logging.getLogger("arxiv")
 # --------------------------------------------------------------- HTTP
 
 def _session() -> requests.Session:
-    s = requests.Session()
-    s.headers["User-Agent"] = "paper-assistant/0.1 (academic project)"
-    return s
+    return new_session()
+
+
+def _oai_decide(r, attempt: int) -> float | None:
+    """503(Retry-After)과 일시적 5xx를 흡수한다."""
+    if r.status_code == 503:
+        wait = int(r.headers.get("Retry-After") or 20)
+        log.warning("503 과부하 — %ds 대기", wait)
+        return wait
+    if r.status_code >= 500:
+        wait = 10 * (attempt + 1)
+        log.warning("%d — %ds 후 재시도", r.status_code, wait)
+        return wait
+    return None
 
 
 def _oai_get(session: requests.Session, params: dict) -> ET.Element:
-    """OAI-PMH 1요청. 503(Retry-After)과 일시적 5xx를 흡수한다."""
-    for attempt in range(MAX_RETRIES):
-        r = session.get(OAI_URL, params=params, timeout=300)
-        if r.status_code == 503:
-            wait = int(r.headers.get("Retry-After") or 20)
-            log.warning("503 과부하 — %ds 대기", wait)
-            time.sleep(wait)
-            continue
-        if r.status_code >= 500:
-            wait = 10 * (attempt + 1)
-            log.warning("%d — %ds 후 재시도", r.status_code, wait)
-            time.sleep(wait)
-            continue
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        err = root.find("oai:error", NS)
-        if err is not None:
-            code = err.get("code")
-            # noRecordsMatch: 조건에 맞는 레코드 없음 → 정상 종료로 취급
-            if code == "noRecordsMatch":
-                return root
+    """OAI-PMH 1요청 → 응답 XML 루트."""
+    r = request_with_retry(session, "GET", OAI_URL, decide=_oai_decide,
+                           retries=MAX_RETRIES, timeout=300, label="OAI",
+                           params=params)
+    root = ET.fromstring(r.content)
+    err = root.find("oai:error", NS)
+    if err is not None:
+        code = err.get("code")
+        # noRecordsMatch: 조건에 맞는 레코드 없음 → 정상 종료로 취급
+        if code != "noRecordsMatch":
             raise RuntimeError(f"OAI 오류 {code}: {err.text}")
-        return root
-    raise RuntimeError(f"OAI {MAX_RETRIES}회 재시도 후에도 실패: {params}")
+    return root
 
 
 # --------------------------------------------------------------- 파싱

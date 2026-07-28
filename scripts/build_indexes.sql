@@ -9,10 +9,9 @@
 
 SET maintenance_work_mem = '1GB';   -- 인덱스 생성 속도에 직접 영향
 
--- Docker 컨테이너의 /dev/shm(기본 64MB)이 작아 병렬 빌드가
--- "could not resize shared memory segment"로 실패한다. 직렬로 빌드한다.
--- (근본 해결은 docker-compose의 shm_size 확대 — 아래 파일 참고)
-SET max_parallel_maintenance_workers = 0;
+-- 병렬 빌드는 켜둔 채로 둔다. 예전에는 컨테이너의 /dev/shm(기본 64MB)이 작아
+-- "could not resize shared memory segment"로 실패해서 직렬로 빌드했지만,
+-- docker-compose.yml에 shm_size: 1gb를 준 뒤로는 필요 없다.
 
 CREATE INDEX IF NOT EXISTS papers_embedding_hnsw
     ON papers USING hnsw (embedding vector_cosine_ops);

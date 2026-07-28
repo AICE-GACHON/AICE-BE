@@ -11,12 +11,12 @@ import logging
 from paper_assistant.db.connection import cursor
 from paper_assistant.embedding.specter2 import (
     CONFIDENCE_MESSAGES, retrieval_confidence)
-from paper_assistant.graph.base_rates import load_base_rates
 from paper_assistant.graph.clustering import aggregate_by_aspect
 from paper_assistant.graph.llm import HAIKU, SONNET
 from paper_assistant.graph.ratings import attach_paper_ratings, build_rating_context
 from paper_assistant.graph.state import PipelineState
-from paper_assistant.graph.venue_stats import conference_of, load_venue_stats
+from paper_assistant.db.stats import (
+    conference_of, load_base_rates, load_venue_stats)
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
     Report, ResubmissionFlow, RetrievalConfidence, ReviewPattern, SimilarityTag,

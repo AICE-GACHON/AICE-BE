@@ -12,13 +12,10 @@
 import argparse
 import logging
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from paper_assistant.ingest import arxiv_client, arxiv_matcher, s2_enricher  # noqa: E402
-from paper_assistant.ingest.s2_client import S2Client  # noqa: E402
-from paper_assistant.ingest.submission_linker import run_linking  # noqa: E402
+from paper_assistant.ingest import arxiv_client, arxiv_matcher, s2_enricher
+from paper_assistant.ingest.s2_client import S2Client
+from paper_assistant.ingest.submission_linker import run_linking
 
 log = logging.getLogger("enrich-all")
 

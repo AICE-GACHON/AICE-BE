@@ -12,9 +12,9 @@ import logging
 import time
 
 import jwt
-import requests
 
 from paper_assistant import config
+from paper_assistant.ingest._http import new_session, request_with_retry
 
 V1 = "https://api.openreview.net"
 V2 = "https://api2.openreview.net"
@@ -30,8 +30,7 @@ class OpenReviewClient:
     def __init__(self, base: str = V2, username: str | None = None,
                  password: str | None = None):
         self.base = base
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = "paper-assistant/0.1 (academic project)"
+        self.session = new_session()
         self.username = username or config.OPENREVIEW_USERNAME
         self.password = password or config.OPENREVIEW_PASSWORD
         if not self.username or not self.password:
@@ -61,6 +60,14 @@ class OpenReviewClient:
             return None
         return token
 
+    @staticmethod
+    def _login_decide(r, attempt: int) -> float | None:
+        if r.status_code != 429:
+            return None
+        wait = 2 ** attempt * 10
+        log.warning("로그인 rate limit, %ds 대기", wait)
+        return wait
+
     def _authenticate(self) -> None:
         token = self._cached_token()
         if token:
@@ -68,42 +75,36 @@ class OpenReviewClient:
             log.debug("캐시된 토큰 사용 (%s)", self.base)
             return
 
-        for attempt in range(MAX_RETRIES):
-            r = self.session.post(f"{self.base}/login",
-                                  json={"id": self.username, "password": self.password},
-                                  timeout=30)
-            if r.status_code == 429:
-                wait = 2 ** attempt * 10
-                log.warning("로그인 rate limit, %ds 대기", wait)
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            token = r.json()["token"]
-            self.session.headers["Authorization"] = f"Bearer {token}"
-            self._token_path.parent.mkdir(parents=True, exist_ok=True)
-            self._token_path.write_text(json.dumps({"token": token}))
-            log.info("OpenReview 로그인 성공: %s (%s)", self.username, self.base)
-            return
-        raise RuntimeError("로그인 rate limit — 잠시 후 다시 시도하세요.")
+        r = request_with_retry(
+            self.session, "POST", f"{self.base}/login", decide=self._login_decide,
+            retries=MAX_RETRIES, timeout=30, label="/login",
+            json={"id": self.username, "password": self.password})
+        token = r.json()["token"]
+        self.session.headers["Authorization"] = f"Bearer {token}"
+        self._token_path.parent.mkdir(parents=True, exist_ok=True)
+        self._token_path.write_text(json.dumps({"token": token}))
+        log.info("OpenReview 로그인 성공: %s (%s)", self.username, self.base)
 
     # --- 조회 ---
 
+    def _decide(self, r, attempt: int) -> float | None:
+        if r.status_code == 429:
+            wait = 2 ** attempt * 5
+            log.warning("rate limit, %ds 대기", wait)
+            return wait
+        if r.status_code == 401:
+            # 토큰이 만료됐다. 캐시를 버리고 재발급받은 뒤 곧바로 다시 시도한다.
+            log.info("토큰 만료 — 재인증")
+            self._token_path.unlink(missing_ok=True)
+            self._authenticate()
+            return 0
+        return None
+
     def _get(self, path: str, **params) -> dict:
-        for attempt in range(MAX_RETRIES):
-            r = self.session.get(f"{self.base}{path}", params=params, timeout=60)
-            if r.status_code == 429:
-                wait = 2 ** attempt * 5
-                log.warning("rate limit, %ds 대기", wait)
-                time.sleep(wait)
-                continue
-            if r.status_code == 401:
-                log.info("토큰 만료 — 재인증")
-                self._token_path.unlink(missing_ok=True)
-                self._authenticate()
-                continue
-            r.raise_for_status()
-            return r.json()
-        raise RuntimeError(f"{path}: {MAX_RETRIES}회 재시도 후에도 실패")
+        r = request_with_retry(self.session, "GET", f"{self.base}{path}",
+                               decide=self._decide, retries=MAX_RETRIES,
+                               timeout=60, label=path, params=params)
+        return r.json()
 
     def count_notes(self, **query) -> int:
         """조건에 맞는 note 총 개수. (limit>=3 + offset이 있어야 count가 온다)"""

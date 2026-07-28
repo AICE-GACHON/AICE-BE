@@ -13,12 +13,8 @@ aspect 빈도를 그냥 세면 코퍼스 base rate가 높은 aspect가 항상 1�
 그래서 **lift(관측률 ÷ base rate) + 이항검정**으로 재정렬하고, 여기에
 **당락 대조**(이 지적을 받은 이웃 vs 아닌 이웃의 accept율)를 붙인다.
 후자가 사용자가 실제로 쓰는 정보다 — "이 지적은 받아도 붙는다 / 받으면 떨어진다".
-
-_greedy_cluster는 범용 유틸로 남겨둔다 (향후 aspect 내부 세분화 등에 사용 가능).
 """
 from math import comb
-
-import numpy as np
 
 from paper_assistant.schemas import ReviewPattern
 
@@ -198,27 +194,3 @@ def _attach_contrast(pattern: ReviewPattern, paper_ids: set, neighbor_ids: set,
         pattern.is_contrast_significant = (
             pattern.contrast_p_value <= MAX_P_VALUE
             and pattern.accept_rate_with < pattern.accept_rate_without)
-
-
-def _greedy_cluster(vectors: np.ndarray, threshold: float) -> list[list[int]]:
-    """정규화된 벡터들을 그리디하게 묶는다. 각 클러스터는 인덱스 리스트.
-
-    범용 유틸. 현재 리뷰 패턴 집계에는 쓰지 않지만(§14), 향후 aspect 내부
-    세분화 등에 재사용할 수 있다.
-    """
-    n = len(vectors)
-    assigned = [False] * n
-    sim = vectors @ vectors.T
-    clusters = []
-    order = np.argsort(-(sim >= threshold).sum(axis=1))
-    for seed in order:
-        if assigned[seed]:
-            continue
-        members = [int(seed)]
-        assigned[seed] = True
-        for j in range(n):
-            if not assigned[j] and sim[seed, j] >= threshold:
-                members.append(j)
-                assigned[j] = True
-        clusters.append(members)
-    return clusters

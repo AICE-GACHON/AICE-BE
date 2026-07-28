@@ -1,15 +1,20 @@
-"""데모 웹 서버 (팀 시연용, 삭제 가능).
+"""데모 웹 서버 (팀 시연용 / 임시 프론트).
 
-이 폴더(demo/)는 AI 파트와 **완전히 독립**이다. paper_assistant.analyze() 하나만
-호출한다 — 즉 백엔드 통합 계약을 그대로 시연한다. 실제 프론트가 준비되면
-이 폴더를 통째로 지우면 된다.
+실제 프론트엔드가 붙기 전까지 **분석 결과를 눈으로 확인하는 유일한 화면**이다.
+이 폴더(demo/)는 백엔드(app/)와 독립이다 — 인증도 DB 쓰기도 없이
+paper_assistant의 공개 함수만 호출한다. 즉 통합 계약을 그대로 시연한다.
 
-실행:
-    pip install -r demo/requirements.txt      # AI 파트 requirements도 설치돼 있어야 함
-    python -m uvicorn demo.server:app --reload --port 8000
+프론트가 준비되면 이 폴더는 지워도 된다 (`paper_assistant/`, `app/`에 영향 없음).
+
+실행 (루트의 requirements.txt만 설치돼 있으면 된다):
+    uvicorn demo.server:app --reload --port 8000
     # 브라우저에서 http://localhost:8000
+
+⚠️ 백엔드 API 서버(`uvicorn app.main:app`)와는 **다른 앱**이다. 같은 포트로 동시에
+띄울 수 없으니 하나를 8001로 옮기거나 번갈아 실행할 것.
 """
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
@@ -22,19 +27,28 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("demo")
 
 STATIC = Path(__file__).parent / "static"
-app = FastAPI(title="논문 RAG 데모")
 
 
-@app.on_event("startup")
-def _warmup():
-    """SPECTER2/그래프를 미리 로드해 첫 요청 지연을 줄인다."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """SPECTER2/그래프를 미리 로드해 첫 요청 지연을 줄인다.
+
+    warmup()은 analyze()가 쓰는 것과 **같은 캐시**를 채운다. 예전에는 build()를
+    직접 불러서, 여기서 만든 모델이 버려지고 첫 분석이 SPECTER2를 한 번 더
+    로드했다 (워밍업이 오히려 두 배로 느렸다).
+    """
     log.info("파이프라인 워밍업 (SPECTER2 로드)...")
     try:
-        from paper_assistant.graph.pipeline import build
-        build(use_llm=False)
+        from paper_assistant.graph.pipeline import warmup
+
+        warmup(use_llm=False)
         log.info("워밍업 완료")
     except Exception as e:
         log.warning("워밍업 실패(첫 요청 때 로드됨): %s", e)
+    yield
+
+
+app = FastAPI(title="논문 RAG 데모", lifespan=lifespan)
 
 
 @app.get("/")

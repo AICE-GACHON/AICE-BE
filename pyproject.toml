@@ -1,0 +1,8 @@
+# 패키징용이 아니라 도구 설정용 파일이다. 의존성은 requirements.txt가 관리한다.
+[tool.pytest.ini_options]
+# 저장소 루트를 import 경로에 넣어준다. 이게 없으면 `pytest`를 그냥 실행했을 때
+# app / paper_assistant를 못 찾아서, 예전처럼 `python -m pytest`나
+# `$env:PYTHONPATH="."` 같은 우회가 필요해진다.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
