@@ -63,8 +63,8 @@ AICE/
 │   ├── graph/                  # LangGraph 고정 DAG (분석 노드들)
 │   ├── db/                     # psycopg3 커넥션 풀 + 적재
 │   └── schemas.py              # Report 등 통합 계약 스키마
-├── scripts/                  # 코퍼스 스키마(init_db.sql) + 수집/집계 배치
-├── tests/                    # AI 파트 테스트 (135건)
+├── scripts/                  # 코퍼스 스키마(init_db.sql) + 수집/집계 배치 + 운영 스크립트
+├── tests/                    # AI 파트 테스트(135건) + 백엔드 라우터 테스트(test_backend_auth.py)
 ├── demo/                     # 통합 계약 참고용 데모 (독립 실행, 삭제 가능)
 ├── alembic/versions/0001_initial_tables.py
 ├── docker-compose.yml        # pgvector Postgres (포트 5433)
@@ -88,11 +88,13 @@ users ──< submissions                     papers ──< reviews ──< rev
 
 ### 서비스 테이블
 - **users**: 회원. 이메일/비밀번호 또는 구글(`google_sub`) 인증. `openreview_id`는
-  가입 경로와 무관하게 필수입니다(서비스가 OpenReview 코퍼스 기반이라 신원 값으로
-  사용). `password_hash`는 구글 전용 계정이 있어 nullable입니다
-  (`alembic/versions/0003_add_google_and_openreview_id.py`). `token_version`은
-  refresh_token 폐기용 버전 카운터로, 로그아웃 시 증가시켜 그 이전에 발급된
-  refresh_token을 전부 무효화합니다 (`alembic/versions/0002_add_user_token_version.py`).
+  가입 경로와 무관하게 필수이며 **unique**입니다(서비스가 OpenReview 코퍼스 기반이라
+  신원 값으로 사용 — 두 계정이 같은 OpenReview 계정을 자처할 수 없게 잠갔습니다,
+  `alembic/versions/0005_unique_openreview_id.py`). `password_hash`는 구글 전용
+  계정이 있어 nullable입니다 (`alembic/versions/0003_add_google_and_openreview_id.py`).
+  `token_version`은 refresh_token 폐기용 버전 카운터로, 로그아웃 시 증가시켜 그
+  이전에 발급된 refresh_token을 전부 무효화합니다
+  (`alembic/versions/0002_add_user_token_version.py`).
 - **submissions**: 사용자가 올린 내 논문 초안. 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
   결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
@@ -100,7 +102,9 @@ users ──< submissions                     papers ──< reviews ──< rev
 - **onboarding_profiles**: 회원가입 전 익명 상태에서 저장하는 온보딩 답변. `user_id`는
   처음엔 null이고, 회원가입 요청(`SignupRequest.onboarding_id`)이 이 id를 실어 보내면
   그때 연결됩니다 — 세션 쿠키 없이 스테이트리스 구조를 유지하기 위한 설계입니다
-  (`alembic/versions/0004_add_onboarding_profiles.py`).
+  (`alembic/versions/0004_add_onboarding_profiles.py`). 회원가입 없이 이탈한
+  미연결 행은 `scripts/cleanup_stale_onboarding.py`로 주기적으로 정리하세요
+  (기본 30일 지난 행 삭제, `--dry-run`으로 미리 확인 가능).
 
 ### 논문 코퍼스 (AI 파트 소유, 43,515편)
 - **papers / reviews / review_points**: ICLR 2020–2025 + NeurIPS 2021–2024에서 수집한
@@ -182,6 +186,12 @@ refresh_token은 JWT라 상태가 없어 개별 폐기가 불가능합니다. �
 (alembic `0002_add_user_token_version`)을 로그아웃 시 1 증가시키고, refresh_token 안에
 발급 시점의 버전을 담아 재발급 요청마다 비교합니다 — 어긋나면 거부합니다
 (`app/core/security.py`, `app/routers/auth.py`).
+
+인증 없이 열려 있는 엔드포인트(signup/login/google/refresh/onboarding)는 IP 기준
+rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signup/login/google
+10/분, refresh 20/분, onboarding 5/분. 저장소가 메모리라 워커를 여러 개로 늘리면
+워커별로 따로 세므로, 그때는 Redis 저장소로 바꿔야 합니다. 백엔드 테스트
+(`tests/test_backend_auth.py`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다.
 
 ## 8. AI팀 연동 방식
 

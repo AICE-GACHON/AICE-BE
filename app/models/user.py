@@ -25,8 +25,10 @@ class User(Base):
     # 같은 이메일로 구글 로그인을 하면 채워진다(app/routers/auth.py google_login).
     google_sub: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     # 서비스 전체가 OpenReview 코퍼스 기반이라, 가입 경로(이메일/구글) 상관없이
-    # 필수로 받는다 — 나중에 "내가 낸 논문" 매칭 등에 쓸 신원 값.
-    openreview_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 필수로 받는다 — 나중에 "내가 낸 논문" 매칭 등에 쓸 신원 값. 한 OpenReview
+    # 계정이 여러 서비스 계정을 자처할 수 없도록 unique로 잠근다
+    # (alembic/versions/0005_unique_openreview_id.py).
+    openreview_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     # refresh_token 폐기용 버전 카운터. 로그아웃 시 1 증가시켜, 그 이전에 발급된
     # refresh_token(버전이 낮음)을 전부 무효화한다 (JWT는 상태가 없어 블랙리스트
     # 없이는 개별 폐기가 불가능하므로, 버전 비교로 대신한다).

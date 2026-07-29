@@ -1,11 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from jose import JWTError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user
 from app.core.google_oauth import verify_google_id_token
+from app.core.rate_limit import limiter
 from app.core.security import (
     create_access_token, create_refresh_token, decode_token, hash_password, verify_password,
 )
@@ -23,10 +25,14 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 _invalid_refresh = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED, detail="refresh_token이 유효하지 않습니다."
 )
+_duplicate_account = HTTPException(
+    status_code=status.HTTP_409_CONFLICT, detail="이미 사용 중인 이메일 또는 OpenReview ID입니다."
+)
 
 
 @router.post("/signup", response_model=ApiResponse[UserResponse], status_code=status.HTTP_201_CREATED)
-def signup(payload: SignupRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 가입된 이메일입니다.")
 
@@ -37,7 +43,13 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         openreview_id=payload.openreview_id,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 이메일은 위에서 이미 체크했지만 동시 요청(race condition)이면 여기서
+        # 걸릴 수 있고, openreview_id 중복은 사전 체크가 없어 여기서만 걸린다.
+        db.rollback()
+        raise _duplicate_account
     db.refresh(user)
 
     if payload.onboarding_id is not None:
@@ -52,7 +64,8 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=ApiResponse[TokenResponse])
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     # password_hash가 없으면 구글 전용 계정 — verify_password에 None을 넘기면
     # passlib이 에러를 던지므로 그 전에 걸러야 한다.
@@ -72,7 +85,8 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/google", response_model=ApiResponse[TokenResponse])
-def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def google_login(request: Request, payload: GoogleLoginRequest, db: Session = Depends(get_db)):
     """구글 로그인/연동. 처음 보는 구글 계정이면 openreview_id가 필수다.
 
     매칭 우선순위: google_sub(이미 연동된 계정) → email(이메일로 가입한 기존
@@ -117,12 +131,16 @@ def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
         user = User(
             email=email,
             password_hash=None,
-            nickname=claims.get("name") or email,
+            nickname=(claims.get("name") or email)[:50],
             google_sub=google_sub,
             openreview_id=payload.openreview_id,
         )
         db.add(user)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise _duplicate_account
         db.refresh(user)
 
     access_token = create_access_token(subject=str(user.user_id))
@@ -133,7 +151,8 @@ def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/refresh", response_model=ApiResponse[TokenResponse])
-def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+@limiter.limit("20/minute")
+def refresh(request: Request, payload: RefreshRequest, db: Session = Depends(get_db)):
     """refresh_token으로 access_token을 재발급한다 (refresh_token도 함께 회전).
 
     로그아웃된 사용자의 refresh_token은 User.token_version이 올라가 있어

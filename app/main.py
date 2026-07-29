@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
 from app.core.error_handlers import register_exception_handlers
+from app.core.rate_limit import limiter
 from app.routers import auth, user, paper, review, submission, feedback, onboarding
 from app.schemas.common import ApiResponse
 
@@ -11,6 +13,9 @@ app = FastAPI(
     description="논문 평가 및 피드백 서비스 백엔드",
     version="0.1.0",
 )
+
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

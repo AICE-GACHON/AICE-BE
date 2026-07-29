@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import limiter
 from app.database import get_db
 from app.models.onboarding import OnboardingProfile
 from app.schemas.common import ApiResponse
@@ -11,7 +12,8 @@ router = APIRouter(prefix="/api/onboarding", tags=["onboarding"])
 
 
 @router.post("", response_model=ApiResponse[OnboardingResponse], status_code=status.HTTP_201_CREATED)
-def create_onboarding(payload: OnboardingCreate, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def create_onboarding(request: Request, payload: OnboardingCreate, db: Session = Depends(get_db)):
     """인증 불필요 — 회원가입 전 익명 상태에서 호출된다.
 
     이 시점엔 user_id가 없다. 나중에 회원가입 요청(SignupRequest.onboarding_id)이
