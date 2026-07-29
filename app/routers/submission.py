@@ -15,6 +15,12 @@ from paper_assistant import extract_pdf_title_abstract
 log = logging.getLogger(__name__)
 
 _PDF_EXTRACT_ERROR = "PDF에서 텍스트를 추출할 수 없습니다."
+# JSON 경로(SubmissionCreate)는 Pydantic Field(max_length=...)로 걸러지지만, 이
+# 엔드포인트는 Form 파라미터라 그 검증을 안 타서 DB 컬럼 길이(String(300)/String(100))를
+# 넘기면 500이 난다. 여기서 미리 걸러 422로 통일한다.
+_MAX_TITLE_LEN = 300
+_MAX_FIELD_LEN = 100
+_MAX_PDF_BYTES = 20 * 1024 * 1024  # 20MB — 논문 PDF치고 넉넉한 상한. 메모리에 통째로 읽으므로 무제한은 위험하다.
 
 # 도메인: submission (사용자가 올린 내 논문 초안 업로드/조회)
 router = APIRouter(prefix="/api/submissions", tags=["submission"])
@@ -66,7 +72,12 @@ async def create_submission_from_pdf(
     if not is_pdf:
         raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
 
+    if len(title) > _MAX_TITLE_LEN or (field is not None and len(field) > _MAX_FIELD_LEN):
+        raise HTTPException(status_code=422, detail="title/field 길이가 너무 깁니다.")
+
     pdf_bytes = await pdf.read()
+    if len(pdf_bytes) > _MAX_PDF_BYTES:
+        raise HTTPException(status_code=422, detail="PDF 용량이 너무 큽니다 (20MB 초과).")
 
     if not title or not abstract:
         try:

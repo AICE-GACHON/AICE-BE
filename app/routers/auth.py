@@ -87,6 +87,15 @@ def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
     google_sub = claims["sub"]
     email = claims.get("email")
 
+    # email_verified가 false면 이 이메일이 실제로 그 구글 계정 소유인지 구글도
+    # 보장하지 않는다는 뜻이다. 이걸 무시하고 이메일로 기존 계정에 자동 연동하면,
+    # 검증 안 된 이메일만 들고 있는 공격자가 남의 email/password 계정을 가로챌 수
+    # 있다 — 그래서 이메일 매칭/신규가입 둘 다 여기서 막는다.
+    if email and not claims.get("email_verified", False):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="구글 계정의 이메일이 인증되지 않았습니다."
+        )
+
     user = db.query(User).filter(User.google_sub == google_sub).first()
 
     if user is None and email:
