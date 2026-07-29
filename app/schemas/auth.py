@@ -11,6 +11,9 @@ class SignupRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=50)
     # 서비스가 OpenReview 코퍼스 기반이라 가입 시점에 필수로 받는다.
     openreview_id: str = Field(min_length=1, max_length=100)
+    # 회원가입 전 POST /api/onboarding으로 익명 저장해둔 답변을 이 계정에 연결한다.
+    # 없거나 잘못된 값이어도 가입 자체는 막지 않는다 (부가 기능일 뿐).
+    onboarding_id: uuid.UUID | None = None
 
 
 class LoginRequest(BaseModel):

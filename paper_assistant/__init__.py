@@ -29,6 +29,15 @@ def list_papers(*args, **kwargs):
     return _list(*args, **kwargs)
 
 
+def extract_pdf_title_abstract(*args, **kwargs):
+    """PDF 바이트 -> (title, abstract). analyze(pdf_bytes=...)가 내부에서 쓰는 것과
+    같은 추출기다 — 백엔드가 제목/초록만 필요할 때(POST /api/submissions/pdf) 전체
+    analyze()를 돌리지 않고 이 함수만 쓴다.
+    """
+    from paper_assistant.pdf.extract import extract_title_abstract as _extract
+    return _extract(*args, **kwargs)
+
+
 def get_paper_revisions(*args, **kwargs):
     """저자가 리뷰를 받고 무엇을 고쳤는지 (제목·초록·PDF 변경 이력).
 

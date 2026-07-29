@@ -10,6 +10,7 @@ from app.core.security import (
     create_access_token, create_refresh_token, decode_token, hash_password, verify_password,
 )
 from app.database import get_db
+from app.models.onboarding import OnboardingProfile
 from app.models.user import User
 from app.schemas.auth import (
     GoogleLoginRequest, LoginRequest, RefreshRequest, SignupRequest, TokenResponse, UserResponse,
@@ -38,6 +39,15 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    if payload.onboarding_id is not None:
+        profile = db.get(OnboardingProfile, payload.onboarding_id)
+        if profile is not None and profile.user_id is None:
+            profile.user_id = user.user_id
+            db.commit()
+        # profile이 없거나 이미 다른 계정에 연결돼 있어도 회원가입은 그대로 성공시킨다
+        # (온보딩 연결은 부가 기능이지, 가입을 막을 이유가 아니다)
+
     return ApiResponse[UserResponse](data=UserResponse.model_validate(user))
 
 

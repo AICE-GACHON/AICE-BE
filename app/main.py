@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.error_handlers import register_exception_handlers
-from app.routers import auth, user, paper, review, submission, feedback
+from app.routers import auth, user, paper, review, submission, feedback, onboarding
 from app.schemas.common import ApiResponse
 
 app = FastAPI(
@@ -29,6 +29,7 @@ app.include_router(paper.router)
 app.include_router(review.router)
 app.include_router(submission.router)
 app.include_router(feedback.router)
+app.include_router(onboarding.router)
 
 
 @app.get("/", response_model=ApiResponse[dict[str, str]])

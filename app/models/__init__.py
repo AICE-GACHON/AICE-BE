@@ -8,10 +8,12 @@
 from app.models.user import User
 from app.models.submission import Submission, SimilarPaperMatch
 from app.models.feedback import ReviewPrediction
+from app.models.onboarding import OnboardingProfile
 
 __all__ = [
     "User",
     "Submission",
     "SimilarPaperMatch",
     "ReviewPrediction",
+    "OnboardingProfile",
 ]

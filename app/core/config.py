@@ -18,7 +18,13 @@ class Settings(BaseSettings):
     DATABASE_URL: str
 
     # 프론트엔드 개발 서버 주소들 (콤마로 구분). 배포 시 실제 프론트 도메인으로 교체.
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    # 5174/5175는 vite가 5173 충돌 시 자동으로 올라가는 포트라 함께 열어둔다.
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+    ]
 
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"

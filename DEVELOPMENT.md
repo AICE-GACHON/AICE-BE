@@ -43,14 +43,16 @@ AICE/
 │   ├── models/                 # SQLAlchemy 모델 — 서비스 테이블만
 │   │   ├── user.py               # users
 │   │   ├── submission.py         # submissions, similar_paper_matches
-│   │   └── feedback.py           # review_predictions
+│   │   ├── feedback.py           # review_predictions
+│   │   └── onboarding.py         # onboarding_profiles
 │   ├── routers/
-│   │   ├── auth.py               # 회원가입/로그인
-│   │   ├── user.py               # 내 정보 조회
-│   │   ├── paper.py              # 코퍼스 논문 상세 (AI 파트 위임)
+│   │   ├── auth.py               # 회원가입/로그인/구글 로그인/refresh/logout
+│   │   ├── user.py               # 내 정보 조회/수정/탈퇴, 온보딩 조회
+│   │   ├── paper.py              # 코퍼스 논문 목록/상세 (AI 파트 위임)
 │   │   ├── review.py             # 코퍼스 논문의 리뷰 목록 (AI 파트 위임)
-│   │   ├── submission.py         # 내 논문 초안 업로드
-│   │   └── feedback.py           # 분석 시작/조회 (핵심)
+│   │   ├── submission.py         # 내 논문 초안 업로드(JSON/PDF)·조회·삭제
+│   │   ├── feedback.py           # 분석 시작/조회 (핵심)
+│   │   └── onboarding.py         # 회원가입 전 익명 온보딩 답변 저장
 │   ├── schemas/                # Pydantic 요청/응답 스키마
 │   └── services/
 │       └── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
@@ -77,10 +79,11 @@ DB는 하나지만 **소유자가 둘로 나뉩니다.** 이 경계를 넘지 �
 [ 서비스 테이블 — alembic이 관리 ]        [ 논문 코퍼스 — scripts/init_db.sql이 관리 ]
 
 users ──< submissions                     papers ──< reviews ──< review_points
-              │                             │  └──< paper_authors >── authors
-              └──< review_predictions       │  └──< submission_links (재투고 흐름)
-                        │                   venue_stats, aspect_base_rates, citations
-                        └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
+  │           │                             │  └──< paper_authors >── authors
+  │           └──< review_predictions       │  └──< submission_links (재투고 흐름)
+  │                     │                   venue_stats, aspect_base_rates, citations
+  │                     └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
+  └──< onboarding_profiles (1:1, user_id nullable — 회원가입 전엔 주인 없음)
 ```
 
 ### 서비스 테이블
@@ -94,6 +97,10 @@ users ──< submissions                     papers ──< reviews ──< rev
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
   결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
 - **similar_paper_matches**: 그 분석이 근거로 삼은 유사 논문 목록 (`rank`, `match_type`).
+- **onboarding_profiles**: 회원가입 전 익명 상태에서 저장하는 온보딩 답변. `user_id`는
+  처음엔 null이고, 회원가입 요청(`SignupRequest.onboarding_id`)이 이 id를 실어 보내면
+  그때 연결됩니다 — 세션 쿠키 없이 스테이트리스 구조를 유지하기 위한 설계입니다
+  (`alembic/versions/0004_add_onboarding_profiles.py`).
 
 ### 논문 코퍼스 (AI 파트 소유, 43,515편)
 - **papers / reviews / review_points**: ICLR 2020–2025 + NeurIPS 2021–2024에서 수집한
@@ -120,7 +127,8 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 
 - DB는 로컬 PostgreSQL이 아니라 `docker compose up -d`로 띄우는 **pgvector 인스턴스(5433)** 입니다.
 - 논문 코퍼스는 git에 없습니다. `scripts/restore_db.sh`로 DB 덤프를 복원해야 합니다.
-- `alembic upgrade head`는 서비스 테이블 4개만 만듭니다.
+- `alembic upgrade head`는 서비스 테이블 5개(`users`, `submissions`,
+  `review_predictions`, `similar_paper_matches`, `onboarding_profiles`)만 만듭니다.
 
 ## 6. 프론트/백엔드가 반드시 지켜야 할 4가지
 
@@ -143,15 +151,17 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 
 | 도메인 | 메서드/경로 | 설명 | 인증 |
 |---|---|---|---|
-| Auth | `POST /api/auth/signup` | 회원가입 | - |
+| Auth | `POST /api/auth/signup` | 회원가입 (openreview_id 필수, onboarding_id로 온보딩 답변 연결 선택) | - |
 | Auth | `POST /api/auth/login` | 로그인, access_token + refresh_token 발급 | - |
 | Auth | `POST /api/auth/google` | 구글 로그인/연동 (id_token 검증, 신규 가입 시 openreview_id 필수) | - |
 | Auth | `POST /api/auth/refresh` | refresh_token으로 access_token 재발급 (refresh_token도 회전) | - |
 | Auth | `POST /api/auth/logout` | 로그아웃 (User.token_version 증가 → 이전 refresh_token 전부 무효화) | 필요 |
 | User | `GET /api/user/me` | 내 정보 조회 | 필요 |
-| User | `PATCH /api/user/me` | 내 정보 수정 (nickname) | 필요 |
+| User | `PATCH /api/user/me` | 내 정보 수정 (nickname, openreview_id) | 필요 |
 | User | `DELETE /api/user/me` | 회원 탈퇴 (submissions 이하 CASCADE 삭제) | 필요 |
-| Submission | `POST /api/submissions` | 내 논문 초안 업로드 | 필요 |
+| User | `GET /api/user/me/onboarding` | 내 온보딩 답변 조회 (마이페이지) | 필요 |
+| Submission | `POST /api/submissions` | 내 논문 초안 업로드 (JSON) | 필요 |
+| Submission | `POST /api/submissions/pdf` | 내 논문 초안 업로드 (PDF, title/abstract 비면 추출) | 필요 |
 | Submission | `GET /api/submissions` | 내 초안 목록 조회 | 필요 |
 | Submission | `GET /api/submissions/{id}` | 내 초안 상세 조회 | 필요 |
 | Submission | `DELETE /api/submissions/{id}` | 초안 삭제 (review_predictions 이하 CASCADE 삭제) | 필요 |
@@ -161,6 +171,7 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 | Paper | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Paper | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
 | Review | `GET /api/reviews?paper_id=` | 특정 논문의 리뷰 목록 | - |
+| Onboarding | `POST /api/onboarding` | 회원가입 전 익명 온보딩 답변 저장 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
 `similar_papers[].paper_id`를 그대로 넘기면 됩니다.
@@ -220,8 +231,6 @@ revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 
 
 ## 10. 남은 작업
 
-- [ ] **PDF 업로드** — `analyze(pdf_bytes=...)`는 이미 PDF에서 제목/초록을 추출할 수 있는데,
-      `POST /api/submissions`가 JSON만 받습니다. multipart 업로드 경로를 추가해야 합니다.
 - [ ] **분석 대기 UX** — 현재는 프론트 폴링입니다. 첫 요청이 특히 느리므로(모델 로드)
       서버 기동 시 워밍업을 넣을지 결정 필요 (`demo/server.py`의 startup 훅이 참고 구현).
 - [ ] **워커 분리 검토** — `BackgroundTasks`는 API 프로세스 안에서 돕니다. 동시 분석이
