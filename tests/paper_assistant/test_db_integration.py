@@ -124,3 +124,31 @@ def test_author_linkage(sample_paper):
             WHERE p.openreview_id = 'test_paper_1'
         """)
         assert [r[0] for r in cur.fetchall()] == ["Test Author"]
+
+
+def test_fulltext_survives_urls_in_the_query(sample_paper):
+    """초록에 URL이 있으면 검색이 통째로 죽던 회귀.
+
+    to_tsvector는 URL을 lexeme으로 그대로 뱉는다(`github.com/a/b](https://…).`).
+    괄호·콜론이 섞여 있어 to_tsquery 파서가 SyntaxError를 냈고, 그 결과 그런
+    초록을 올린 사용자는 분석이 실패했다. lexeme을 quote_literal로 감싸 해결.
+    """
+    from paper_assistant.retrieval.hybrid_search import _fulltext_search
+
+    query = ("See our code at https://github.com/foo/bar](https://github.com/foo/bar). "
+             "We propose a graph neural network for molecular property prediction.")
+    with cursor() as cur:
+        hits = _fulltext_search(cur, query, limit=5)   # 예외가 나지 않아야 한다
+    assert isinstance(hits, list)
+
+
+def test_fulltext_still_matches_normal_abstracts(sample_paper):
+    """인용을 씌운 뒤에도 평범한 초록이 정상적으로 걸려야 한다."""
+    from paper_assistant.retrieval.hybrid_search import _fulltext_search
+
+    with cursor() as cur:
+        hits = _fulltext_search(
+            cur,
+            "graph neural network molecular property prediction message passing",
+            limit=10)
+    assert hits, "정상 초록이 하나도 매칭되지 않는다면 인용이 과하게 좁힌 것"

@@ -70,11 +70,18 @@ def _fulltext_search(cur, query_text: str, limit: int) -> list[int]:
     넣으면 그 단어를 전부 가진 문서만 걸린다 — 실측 결과 200편 중 1편만 매칭되어
     FTS가 사실상 무력화됐다. 그래서 lexeme을 OR로 결합해 ts_rank가 겹치는 정도로
     순위를 매기게 한다 (BM25에 가까운 동작). 실측: 같은 조건에서 200/200편 매칭.
+
+    ⚠️ lexeme은 반드시 quote_literal로 감싼다. to_tsvector는 URL 같은 토큰을
+    그대로 lexeme으로 뱉는데(`github.com/a/b](https://…).`), 여기에 괄호·콜론이
+    들어 있어 to_tsquery 파서가 SyntaxError를 낸다. 즉 **초록에 URL이 있으면
+    분석이 통째로 실패했다** (held-out 평가에서 발견). 인용은 동작을 바꾸지
+    않는다 — 실측으로 매칭 수 33,638편, top-50, 1위까지 인용 전후가 동일하다.
     """
     cur.execute(
         """
         WITH q AS (
-            SELECT to_tsquery('english', string_agg(lexeme, ' | ')) AS query
+            SELECT to_tsquery('english', string_agg(quote_literal(lexeme), ' | '))
+                   AS query
             FROM unnest(to_tsvector('english', %s))
         )
         SELECT p.id
