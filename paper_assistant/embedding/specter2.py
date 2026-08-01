@@ -10,7 +10,6 @@ adapter 종류 (같은 base 위에 갈아끼움):
 - proximity : 논문↔논문 유사도 검색 (본 프로젝트의 용도)
 - adhoc_query: 짧은 키워드 쿼리 → 논문 검색
 """
-import bisect
 import logging
 
 import torch
@@ -67,47 +66,6 @@ class Specter2Embedder:
 
     def encode_one(self, title: str, abstract: str):
         return self.encode([(title, abstract)])[0]
-
-
-# --- 코사인 유사도 → 백분위 변환 -------------------------------------------
-#
-# SPECTER2의 코사인 값은 0.72~0.98의 좁은 구간에 압축되어 있다.
-# ICLR 2024 논문 300편(무작위 쌍 89,700개)으로 실측한 분포:
-#   평균 0.845 / 표준편차 0.033 / 중앙값 0.845
-# 즉 **무관한 논문쌍도 0.84가 나온다**. 원시 코사인 값을 그대로
-# "유사도 84%"처럼 노출하면 사용자가 반드시 오해한다.
-#
-# 아래 참조 분위수로 원시 점수를 백분위로 바꿔서 노출한다.
-# (scripts/measure_similarity_dist.py 로 재측정 가능)
-
-_REFERENCE_QUANTILES = [
-    (0.7708, 1.0), (0.7924, 5.0), (0.8233, 25.0), (0.8448, 50.0),
-    (0.8668, 75.0), (0.8998, 95.0), (0.9231, 99.0), (0.9442, 99.9),
-]
-_REF_SCORES = [s for s, _ in _REFERENCE_QUANTILES]
-_REF_PERCENTILES = [p for _, p in _REFERENCE_QUANTILES]
-
-
-def similarity_percentile(cosine: float) -> float:
-    """코사인 유사도 → 무작위 논문쌍 대비 백분위(0~100).
-
-    ⚠️ **논문별 유사도 표시에는 쓰지 말 것** (설계서 §20 실측).
-    검색 top-20의 코사인 폭이 0.013밖에 안 되어 이 함수를 통과시키면 전부 100이
-    된다 — 1위와 20위가 같은 값이 나오므로 사용자에게 보여줄 정보가 없다.
-    남겨둔 이유는 `retrieval_confidence()`가 **쿼리 단위** 판정에 쓰기 때문이다.
-
-    예: 0.92 → 약 99.0 (무작위 쌍의 99%보다 유사 = 상위 1%)
-    선형 보간이며, 참조 구간을 벗어나면 0/100에 수렴한다.
-    """
-    if cosine <= _REF_SCORES[0]:
-        return max(0.0, _REF_PERCENTILES[0] * cosine / _REF_SCORES[0])
-    if cosine >= _REF_SCORES[-1]:
-        return 100.0
-
-    i = bisect.bisect_right(_REF_SCORES, cosine)
-    s0, s1 = _REF_SCORES[i - 1], _REF_SCORES[i]
-    p0, p1 = _REF_PERCENTILES[i - 1], _REF_PERCENTILES[i]
-    return p0 + (p1 - p0) * (cosine - s0) / (s1 - s0)
 
 
 # --- 검색 결과 신뢰도 (쿼리 단위) -------------------------------------------

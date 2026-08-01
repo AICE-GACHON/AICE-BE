@@ -9,7 +9,9 @@
 위주로만 공개하기 때문이고, 실제 채택률(~25%)이 아니다. 이런 venue는
 `is_coverage_biased`를 세워 절대 accept율·당락 경계를 신뢰하지 않게 한다.
 
-    $env:PYTHONPATH="."; python scripts/build_venue_stats.py
+    python scripts/build_venue_stats.py
+
+스키마는 scripts/init_db.sql이 소유한다 — 여기서 CREATE TABLE 하지 않는다.
 """
 import logging
 
@@ -21,24 +23,6 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 MIN_REJECT_SHARE = 0.15
 # 경계 추정 시 버킷당 최소 표본. 꼬리의 우연한 역전을 막는다.
 MIN_BUCKET_N = 30
-
-DDL = """
-CREATE TABLE IF NOT EXISTS venue_stats (
-    venue               TEXT PRIMARY KEY,
-    papers              BIGINT NOT NULL,
-    accept_count        BIGINT NOT NULL,
-    reject_count        BIGINT NOT NULL,
-    accept_rate         REAL   NOT NULL,
-    rating_mean         REAL,
-    rating_sd           REAL,
-    accept_rating_mean  REAL,
-    reject_rating_mean  REAL,
-    scale_max           REAL,
-    threshold_50        REAL,      -- 통과율 50%를 넘기는 최저 평균 rating
-    is_coverage_biased  BOOLEAN NOT NULL DEFAULT false,
-    computed_at         TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
 
 # 논문 단위 평균 rating. 리뷰 수가 논문마다 달라 리뷰 단위로 평균내면
 # 리뷰가 많은 논문에 가중치가 쏠린다.
@@ -103,7 +87,6 @@ def _threshold(cur, venue: str) -> float | None:
 
 def main() -> None:
     with cursor() as cur:
-        cur.execute(DDL)
         cur.execute(BASE)
         cur.execute(AGG)
         rows = cur.fetchall()

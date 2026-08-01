@@ -39,6 +39,8 @@ class SearchResult:
     """원시 코사인. **사용자에게 절대 노출 금지** — 쿼리 단위 신뢰도 판정에만 쓴다."""
     match_type: str
     """both(의미+용어) / semantic(의미만) / lexical(용어만). 왜 걸렸는지의 $0 근거."""
+    meta_review: str | None = None
+    """AC 총평. 개별 리뷰보다 신호가 강해 종합 단계에서 근거로 인용한다."""
 
 
 def _vector_search(cur, embedding, limit: int) -> list[tuple[int, float]]:
@@ -68,11 +70,18 @@ def _fulltext_search(cur, query_text: str, limit: int) -> list[int]:
     넣으면 그 단어를 전부 가진 문서만 걸린다 — 실측 결과 200편 중 1편만 매칭되어
     FTS가 사실상 무력화됐다. 그래서 lexeme을 OR로 결합해 ts_rank가 겹치는 정도로
     순위를 매기게 한다 (BM25에 가까운 동작). 실측: 같은 조건에서 200/200편 매칭.
+
+    ⚠️ lexeme은 반드시 quote_literal로 감싼다. to_tsvector는 URL 같은 토큰을
+    그대로 lexeme으로 뱉는데(`github.com/a/b](https://…).`), 여기에 괄호·콜론이
+    들어 있어 to_tsquery 파서가 SyntaxError를 낸다. 즉 **초록에 URL이 있으면
+    분석이 통째로 실패했다** (held-out 평가에서 발견). 인용은 동작을 바꾸지
+    않는다 — 실측으로 매칭 수 33,638편, top-50, 1위까지 인용 전후가 동일하다.
     """
     cur.execute(
         """
         WITH q AS (
-            SELECT to_tsquery('english', string_agg(lexeme, ' | ')) AS query
+            SELECT to_tsquery('english', string_agg(quote_literal(lexeme), ' | '))
+                   AS query
             FROM unnest(to_tsvector('english', %s))
         )
         SELECT p.id
@@ -102,9 +111,12 @@ def rrf_fuse(*rank_maps: dict[int, int], k: int = RRF_K) -> dict[int, float]:
 def _fetch_metadata(cur, paper_ids: list[int]) -> dict[int, tuple]:
     if not paper_ids:
         return {}
+    # meta_review(AC 총평)는 종합 단계에서 근거로 인용한다. 전문은 길어서
+    # 여기서 잘라 온다 — 어차피 프롬프트에 넣을 땐 더 줄인다(graph/evidence.py).
     cur.execute(
         """
-        SELECT id, openreview_id, title, abstract, venue, year, decision
+        SELECT id, openreview_id, title, abstract, venue, year, decision,
+               left(meta_review, 2000)
         FROM papers WHERE id = ANY(%s)
         """,
         (paper_ids,),
@@ -135,7 +147,8 @@ def hybrid_search(embedding, query_text: str, top_k: int = 20,
     for pid, score in ranked:
         if pid not in meta:
             continue
-        openreview_id, title, abstract, venue, year, decision = meta[pid]
+        (openreview_id, title, abstract, venue, year, decision,
+         meta_review) = meta[pid]
         results.append(SearchResult(
             paper_id=pid,
             openreview_id=openreview_id,
@@ -149,6 +162,7 @@ def hybrid_search(embedding, query_text: str, top_k: int = 20,
             fts_rank=fts_ranks.get(pid),
             cosine=cosines.get(pid),
             match_type=match_type(vector_ranks.get(pid), fts_ranks.get(pid)),
+            meta_review=meta_review,
         ))
     return results
 

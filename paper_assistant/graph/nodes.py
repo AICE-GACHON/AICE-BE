@@ -11,12 +11,15 @@ import logging
 from paper_assistant.db.connection import cursor
 from paper_assistant.embedding.specter2 import (
     CONFIDENCE_MESSAGES, retrieval_confidence)
-from paper_assistant.graph.base_rates import load_base_rates
 from paper_assistant.graph.clustering import aggregate_by_aspect
-from paper_assistant.graph.llm import HAIKU, SONNET
+from paper_assistant.graph.evidence import (
+    build_evidence, format_for_prompt, validate_citations)
+from paper_assistant.graph.llm import (
+    HAIKU, SONNET, SONNET_EFFORT, SONNET_MAX_TOKENS)
 from paper_assistant.graph.ratings import attach_paper_ratings, build_rating_context
 from paper_assistant.graph.state import PipelineState
-from paper_assistant.graph.venue_stats import conference_of, load_venue_stats
+from paper_assistant.db.stats import (
+    conference_of, load_base_rates, load_venue_stats)
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
     Report, ResubmissionFlow, RetrievalConfidence, ReviewPattern, SimilarityTag,
@@ -109,13 +112,19 @@ def review_analysis_node(state: PipelineState, embedder, llm) -> dict:
         if not measurable:
             return {"review_patterns": []}
 
+        # id를 같이 읽는다 — 요약이 인용한 문장을 review_points.id로 역추적한다.
+        # needs_llm_split도 읽는다: 미분리 리뷰의 항목은 본문 전체를 weakness로
+        # 라벨링한 것이라 요약·칭찬 문장이 섞여 있다. 집계 분모에는 그대로 쓰되
+        # (base rate 정의와 맞춰야 한다), 인용할 대표 문장으로는 뒤로 미룬다.
         cur.execute(
             """
-            SELECT paper_id, aspect, text FROM review_points
-            WHERE paper_id = ANY(%s) AND sentiment = 'weakness'
+            SELECT p.id, p.paper_id, p.aspect, p.text, r.needs_llm_split
+            FROM review_points p JOIN reviews r ON r.id = p.review_id
+            WHERE p.paper_id = ANY(%s) AND p.sentiment = 'weakness'
             """,
             (sorted(measurable),))
-        points = [{"paper_id": r[0], "aspect": r[1], "text": r[2]}
+        points = [{"point_id": r[0], "paper_id": r[1], "aspect": r[2],
+                   "text": r[3], "from_unsplit": bool(r[4])}
                   for r in cur.fetchall()]
 
     patterns = aggregate_by_aspect(
@@ -237,11 +246,18 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
     ranked_cos = [p.cosine for p in sorted(
         (p for p in papers if p.cosine is not None and p.vector_rank is not None),
         key=lambda p: p.vector_rank)]
-    level, evidence = retrieval_confidence(ranked_cos)
+    level, evidence_score = retrieval_confidence(ranked_cos)
     confidence = RetrievalConfidence(
-        level=level, evidence=round(evidence, 4),
+        level=level, evidence=round(evidence_score, 4),
         is_reliable=level != "weak",
         message=CONFIDENCE_MESSAGES[level])
+
+    # 검색된 원문(리뷰 지적 문장 + AC 총평)을 인용 가능한 근거 풀로 만든다.
+    # LLM을 끄더라도 채운다 — 근거 목록은 생성 결과가 아니라 검색 결과다.
+    evidence_pool = build_evidence(patterns, papers)
+
+    summary, citations = _summary(state, similar, patterns, trends,
+                                  rating_context, confidence, evidence_pool, llm)
 
     report = Report(
         query_title=state["query_title"],
@@ -252,8 +268,9 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         venue_trends=trends,
         rating_context=rating_context,
         resubmission_flows=state.get("resubmission_flows", []),
-        summary_markdown=_summary(state, similar, patterns, trends,
-                                  rating_context, confidence, llm),
+        evidence=evidence_pool,
+        citations=citations,
+        summary_markdown=summary,
     )
     return {"report": report}
 
@@ -290,8 +307,17 @@ def _rating_lines(rc) -> list[str]:
     return lines
 
 
+def _first_label(evidence_pool, aspect: str) -> str:
+    """해당 aspect의 첫 근거 라벨. 없으면 빈 문자열 (스텁 요약이 인용할 때 쓴다)."""
+    for e in evidence_pool:
+        if e.aspect == aspect:
+            return f" [{e.label}]"
+    return ""
+
+
 def _summary(state, similar, patterns, trends, rating_context, confidence,
-             llm) -> str:
+             evidence_pool, llm) -> tuple[str, list[str]]:
+    """(요약 마크다운, 실제로 인용된 근거 라벨) 반환."""
     distinctive = [p for p in patterns if p.is_distinctive]
     risky = _risky_first(patterns)
     rc = rating_context
@@ -302,9 +328,11 @@ def _summary(state, similar, patterns, trends, rating_context, confidence,
         # 신뢰할 수 없는 결과면 맨 앞에서 알린다 — 뒤에 묻으면 아무도 안 읽는다
         if not confidence.is_reliable:
             lines.insert(0, f"> ⚠️ **{confidence.message}**\n")
+        # 스텁도 근거 라벨을 단다 — LLM을 꺼도 "이 결론의 출처"가 추적된다.
         if distinctive:
             lines.append("- 이 주제 특유의 지적: " + ", ".join(
                 f"{p.label}({p.paper_count}/{p.total_papers}, lift {p.lift})"
+                f"{_first_label(evidence_pool, p.aspect)}"
                 for p in distinctive[:3]))
         else:
             lines.append("- 이 주제 특유의 지적 없음 (전부 코퍼스 평균 수준)")
@@ -314,7 +342,8 @@ def _summary(state, similar, patterns, trends, rating_context, confidence,
                 f"- 당락에 실제로 영향: {p.label} — 지적받은 {p.decided_with}편 중 "
                 f"{p.accept_with}편 통과({p.accept_rate_with*100:.0f}%) vs "
                 f"미지적 {p.decided_without}편 중 {p.accept_without}편"
-                f"({p.accept_rate_without*100:.0f}%), p={p.contrast_p_value}")
+                f"({p.accept_rate_without*100:.0f}%), p={p.contrast_p_value}"
+                f"{_first_label(evidence_pool, p.aspect)}")
         else:
             lines.append("- 당락 격차가 유의한 지적 없음 (이웃 표본이 작아 판단 보류)")
         lines += _rating_lines(rc)
@@ -323,7 +352,8 @@ def _summary(state, similar, patterns, trends, rating_context, confidence,
                 f"{t.venue} {t.accept_count}/{t.paper_count}"
                 + (" (표본 편향)" if t.is_coverage_biased else "")
                 for t in trends[:3]))
-        return "\n".join(lines)
+        # 스텁이 만든 라벨도 같은 검증을 통과시킨다 (경로를 하나로 유지).
+        return validate_citations("\n".join(lines), evidence_pool)
 
     facts = {
         "query": state["query_title"],
@@ -331,6 +361,10 @@ def _summary(state, similar, patterns, trends, rating_context, confidence,
         "similar_papers": [{"title": s.title, "venue": s.venue,
                             "decision": s.decision, "match_type": s.match_type}
                            for s in similar[:10]],
+        # 검색된 **원문**. 통계만 주면 "베이스라인 비교 부족" 같은 라벨을 되풀이할
+        # 뿐이라, 실제 리뷰 문장과 AC 총평을 함께 넣어 구체적으로 쓰게 한다.
+        # 이 항목이 이 파이프라인을 검색 증강 생성(RAG)으로 만드는 지점이다.
+        "evidence": format_for_prompt(evidence_pool),
         # lift와 당락 대조를 같이 넘긴다. 빈도만 주면 모델이 "베이스라인 비교를
         # 강화하세요" 같은 코퍼스 상수를 결론처럼 써버린다 (§18).
         "review_patterns": [{
@@ -381,13 +415,56 @@ def _summary(state, similar, patterns, trends, rating_context, confidence,
         "otherwise the sample is too small — mention it as tentative or omit it. "
         "If nothing is distinctive, say so plainly rather than manufacturing an "
         "insight.\n"
+        "The two measures answer different questions and are independent. Lift compares "
+        "this neighbourhood's criticism rate against the whole corpus (is this topic "
+        "unusual?). The accept-rate contrast compares criticised vs uncriticised papers "
+        "WITHIN this neighbourhood (did this criticism cost them?). A criticism can be "
+        "corpus-typical and still separate accept from reject here. Never explain one "
+        "measure with the other, and never claim an accept-rate gap is or is not typical "
+        "of the corpus — you are given no corpus-wide contrast data, so that comparison "
+        "cannot be made.\n"
         "Review scores: state the neighborhood mean and, when accept_threshold is "
         "given, what score this topic needs to clear. Never compare raw scores "
         "across different venues — the scales differ.\n"
         "Any venue in coverage_biased_venues publishes reviews mainly for ACCEPTED "
         "papers, so its accept rate is a sampling artifact, not a real acceptance "
         "rate — never tell the user that venue is easier to get into. Use accept_lift "
-        "(neighborhood vs that venue's own corpus) for relative statements instead. "
+        "(neighborhood vs that venue's own corpus) for relative statements instead.\n"
+        "GROUNDING: the `evidence` array holds VERBATIM text retrieved from the "
+        "corpus — real reviewer criticisms (kind=review_point) and area-chair "
+        "meta-reviews (kind=meta_review). Ground your claims in it: when a sentence "
+        "rests on a specific criticism, append that item's label in brackets, e.g. "
+        "[E1] or [M2]. Combine as [E1, E2]. Prefer naming the concrete objection "
+        "('evaluated only on QM9') over the generic category label. "
+        "Cite ONLY labels present in `evidence` — a label you invent will be stripped "
+        "and the sentence will look unsupported. Statistics (counts, lift, accept "
+        "rates) need no citation; they come from the aggregates above. "
+        "Do not quote evidence text at length — paraphrase in Korean.\n"
+        "A citation is a specific claim: that THIS item's text supports THIS sentence, "
+        "about THIS item's paper. Before appending a label, re-read the item — does it "
+        "actually say what your sentence says, about the paper your sentence names? If "
+        "not, drop the label or rewrite the sentence. A real label on a sentence it does "
+        "not support is worse than no citation at all, because it looks verified.\n"
+        "Every E* item is a CRITICISM a reviewer raised. The corpus records no strengths "
+        "at all, so the pool contains none and you have no evidence for any claim that "
+        "something is a strength, is well done, or is exemplary — do not make such claims, "
+        "and never attach a citation to one.\n"
+        "WRITING FOR THE READER: the input keys above (distinctive, lift, "
+        "contrast_significant, accept_lift, coverage_biased, corpus, corpus-wide, "
+        "base_rate …) are the shape of "
+        "the data handed to you, not vocabulary for the reader. Write every one of them "
+        "as plain Korean: '이 주제에 특히 두드러진 지적', '코퍼스 평균의 1.6배', "
+        "'표본이 충분해 우연으로 보기 어렵다', '채택 논문 위주로만 공개된 학회'. "
+        "The reader has never seen the JSON and cannot look a key up. Bracketed "
+        "citation labels ([E1], [M2]) are the sole exception — keep those verbatim.\n"
+        "LENGTH: about 250 words. Achieve it by covering fewer things, not by "
+        "compressing sentences into fragments — every sentence stays complete and "
+        "readable. If you must drop something, drop the detail that would not change "
+        "what the reader does next.\n"
         "Do not invent facts.")
-    return llm.text(SONNET, system, json.dumps(facts, ensure_ascii=False),
-                    max_tokens=1200)
+    raw = llm.text(SONNET, system, json.dumps(facts, ensure_ascii=False),
+                   max_tokens=SONNET_MAX_TOKENS,
+                   thinking={"type": "adaptive"},
+                   output_config={"effort": SONNET_EFFORT})
+    # 모델이 지어낸 라벨은 여기서 제거된다 — 남은 인용은 전부 실제 원문을 가리킨다.
+    return validate_citations(raw, evidence_pool)

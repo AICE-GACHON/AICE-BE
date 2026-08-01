@@ -3,25 +3,16 @@
 리뷰 패턴의 lift 계산에 쓰인다 (설계서 §18). 수집이 끝난 뒤 1회 실행하고,
 이후 데이터가 크게 늘면 다시 돌리면 된다. 96만 건 집계라 수 초 걸린다.
 
-    $env:PYTHONPATH="."; python scripts/build_base_rates.py
+    python scripts/build_base_rates.py
+
+스키마는 scripts/init_db.sql이 소유한다 — 여기서 CREATE TABLE 하지 않는다.
+두 곳에 DDL이 있으면 한쪽만 고쳤을 때 조용히 갈라진다.
 """
 import logging
 
 from paper_assistant.db.connection import cursor
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-DDL = """
-CREATE TABLE IF NOT EXISTS aspect_base_rates (
-    aspect       TEXT NOT NULL,
-    sentiment    TEXT NOT NULL,
-    paper_count  BIGINT NOT NULL,
-    total_papers BIGINT NOT NULL,
-    base_rate    REAL   NOT NULL,
-    computed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (aspect, sentiment)
-);
-"""
 
 # 분모는 "**모든 리뷰가 파싱된** 논문 수"다. 리뷰 일부만 파싱된 논문을 넣으면
 # 안 된다 — 강/약점 미분리 리뷰 중 약점 섹션을 못 살린 것은 지적을 볼 수 없어
@@ -62,7 +53,6 @@ SET paper_count  = EXCLUDED.paper_count,
 
 def main(sentiment: str = "weakness") -> None:
     with cursor() as cur:
-        cur.execute(DDL)
         cur.execute(MEASURABLE, {"sentiment": sentiment})
         cur.execute(MEASURABLE_INDEX)
         cur.execute(COMPUTE, {"sentiment": sentiment})

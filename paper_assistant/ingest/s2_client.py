@@ -15,9 +15,8 @@ import logging
 import re
 import time
 
-import requests
-
 from paper_assistant import config
+from paper_assistant.ingest._http import new_session, request_with_retry
 
 BASE = "https://api.semanticscholar.org/graph/v1"
 BATCH_SIZE = 500       # /paper/batch 상한
@@ -43,10 +42,8 @@ class S2Client:
                 "S2_API_KEY가 없습니다. 키 없이는 모든 요청이 429입니다. "
                 "https://www.semanticscholar.org/product/api#api-key 에서 발급해 "
                 ".env에 S2_API_KEY로 넣으세요 (.env.example 참고).")
-        self.session = requests.Session()
-        self.session.headers.update({
-            "x-api-key": key,
-            "User-Agent": "paper-assistant/0.1 (academic project)"})
+        self.session = new_session()
+        self.session.headers["x-api-key"] = key
         self.gap = gap
         self.search_gap = search_gap
         self._last = 0.0
@@ -57,24 +54,27 @@ class S2Client:
             time.sleep(wait)
         self._last = time.time()
 
+    @staticmethod
+    def _decide(path: str):
+        """429는 레이트리밋, 5xx는 S2 쪽 일시 장애 — 둘 다 재시도로 넘긴다."""
+        def decide(r, attempt: int) -> float | None:
+            if r.status_code not in (429, 500, 502, 503, 504):
+                return None
+            wait = min(2 ** attempt, MAX_BACKOFF)
+            # 1~2회는 흔하다. 그 이상 반복되면 눈에 보이게 올린다.
+            emit = log.warning if attempt >= 2 else log.debug
+            emit("%d %s — %ds 후 재시도(%d/%d)",
+                 r.status_code, path, wait, attempt + 1, MAX_RETRIES)
+            return wait
+        return decide
+
     def _request(self, method: str, path: str, **kwargs):
         gap = self.search_gap if path.startswith("/paper/search") else self.gap
-        for attempt in range(MAX_RETRIES):
-            self._throttle(gap)
-            r = self.session.request(method, f"{BASE}{path}", timeout=180, **kwargs)
-            # 429는 레이트리밋, 500/504는 S2 쪽 일시 장애 — 둘 다 재시도로 넘긴다.
-            if r.status_code in (429, 500, 502, 503, 504):
-                wait = min(2 ** attempt, MAX_BACKOFF)
-                # 1~2회는 흔하다. 그 이상 반복되면 눈에 보이게 올린다.
-                emit = log.warning if attempt >= 2 else log.debug
-                emit("%d %s — %ds 후 재시도(%d/%d)",
-                     r.status_code, path, wait, attempt + 1, MAX_RETRIES)
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            return r.json()
-        raise RuntimeError(f"{path}: {MAX_RETRIES}회 재시도 후에도 실패 "
-                           f"(마지막 {r.status_code})")
+        response = request_with_retry(
+            self.session, method, f"{BASE}{path}",
+            decide=self._decide(path), retries=MAX_RETRIES, timeout=180,
+            label=path, before=lambda: self._throttle(gap), **kwargs)
+        return response.json()
 
     # ------------------------------------------------------------ 엔드포인트
 

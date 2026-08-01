@@ -13,14 +13,10 @@ aspect 빈도를 그냥 세면 코퍼스 base rate가 높은 aspect가 항상 1�
 그래서 **lift(관측률 ÷ base rate) + 이항검정**으로 재정렬하고, 여기에
 **당락 대조**(이 지적을 받은 이웃 vs 아닌 이웃의 accept율)를 붙인다.
 후자가 사용자가 실제로 쓰는 정보다 — "이 지적은 받아도 붙는다 / 받으면 떨어진다".
-
-_greedy_cluster는 범용 유틸로 남겨둔다 (향후 aspect 내부 세분화 등에 사용 가능).
 """
 from math import comb
 
-import numpy as np
-
-from paper_assistant.schemas import ReviewPattern
+from paper_assistant.schemas import ReviewExample, ReviewPattern
 
 # aspect 표시 라벨 (프론트/요약용)
 ASPECT_LABELS = {
@@ -135,13 +131,26 @@ def aggregate_by_aspect(points: list[dict], total_papers: int,
         paper_ids = {it["paper_id"] for it in items}
         if len(paper_ids) < min_papers:
             continue
-        # 대표 문장: 가장 긴(= 구체적인) 지적을 예시 앞에 둔다
-        items_sorted = sorted(items, key=lambda it: len(it["text"]), reverse=True)
-        # 서로 다른 논문에서 예시를 뽑아 다양성 확보
+        # 대표 문장 정렬: 분리 포맷 리뷰를 먼저, 그다음 긴(= 구체적인) 것부터.
+        #
+        # 미분리 리뷰(2023년 이전, 코퍼스의 37%)는 본문 전체가 weakness로 라벨링돼
+        # 있어 요약·칭찬 문장이 섞여 있다. 길이만으로 고르면 "This paper proposes …"
+        # 같은 요약문이 대표 '지적'으로 뽑혀 인용된다(실측). 집계 수치는 그대로 두고
+        # 인용할 문장만 신뢰할 수 있는 쪽을 우선한다.
+        items_sorted = sorted(
+            items,
+            key=lambda it: (it.get("from_unsplit", False), -len(it["text"])))
+        # 서로 다른 논문에서 예시를 뽑아 다양성 확보.
+        # 문자열이 아니라 출처(point_id/paper_id)를 함께 담는다 — 요약문의 인용
+        # 표기가 이 문장으로 역추적되어야 한다 (graph/evidence.py).
         examples, seen = [], set()
         for it in items_sorted:
             if it["paper_id"] not in seen:
-                examples.append(it["text"][:160])
+                examples.append(ReviewExample(
+                    text=it["text"][:400],
+                    paper_id=it["paper_id"],
+                    review_point_id=it.get("point_id"),
+                    from_unsplit_review=bool(it.get("from_unsplit", False))))
                 seen.add(it["paper_id"])
             if len(examples) >= 3:
                 break
@@ -198,27 +207,3 @@ def _attach_contrast(pattern: ReviewPattern, paper_ids: set, neighbor_ids: set,
         pattern.is_contrast_significant = (
             pattern.contrast_p_value <= MAX_P_VALUE
             and pattern.accept_rate_with < pattern.accept_rate_without)
-
-
-def _greedy_cluster(vectors: np.ndarray, threshold: float) -> list[list[int]]:
-    """정규화된 벡터들을 그리디하게 묶는다. 각 클러스터는 인덱스 리스트.
-
-    범용 유틸. 현재 리뷰 패턴 집계에는 쓰지 않지만(§14), 향후 aspect 내부
-    세분화 등에 재사용할 수 있다.
-    """
-    n = len(vectors)
-    assigned = [False] * n
-    sim = vectors @ vectors.T
-    clusters = []
-    order = np.argsort(-(sim >= threshold).sum(axis=1))
-    for seed in order:
-        if assigned[seed]:
-            continue
-        members = [int(seed)]
-        assigned[seed] = True
-        for j in range(n):
-            if not assigned[j] and sim[seed, j] >= threshold:
-                members.append(j)
-                assigned[j] = True
-        clusters.append(members)
-    return clusters

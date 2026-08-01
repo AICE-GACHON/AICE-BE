@@ -1,0 +1,5 @@
+# 개발/테스트 전용. 배포 이미지에는 넣지 않는다.
+-r requirements.txt
+
+pytest>=8.0
+httpx>=0.27          # fastapi.testclient가 요구한다

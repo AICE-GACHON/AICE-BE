@@ -14,7 +14,7 @@ class TimestampMixin(BaseModel):
 
 
 class Message(BaseModel):
-    """단순 메시지 응답 (ping, 성공 알림 등)."""
+    """단순 메시지 응답 (로그아웃·탈퇴처럼 돌려줄 데이터가 안내 문구뿐일 때)."""
     message: str
 
 
@@ -29,7 +29,7 @@ class ErrorDetail(BaseModel):
 class ApiResponse(BaseModel, Generic[DataT]):
     """
     모든 API 응답을 감싸는 공통 포맷. 성공이면 data에 실제 응답을,
-    실패면 error에 에러 정보를 채웁니다 (전역 에러 핸들러는 app/core/error_handlers.py 참고).
+    실패면 error에 에러 정보를 채웁니다 (전역 에러 핸들러는 app/core/errors.py 참고).
     """
     success: bool = True
     data: DataT | None = None
