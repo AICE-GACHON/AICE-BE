@@ -57,7 +57,7 @@ AICE/
 │   │   └── corpus.py             # AI 파트 스키마 재수출 (중복 정의 금지)
 │   └── services/
 │       └── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
-├── paper_assistant/          # AI 파트 (공개 API 4개)
+├── paper_assistant/          # AI 파트 (공개 API 6개)
 │   ├── config.py               # ★ 공유 환경설정의 단일 소스
 │   ├── schemas.py              # Report 등 통합 계약 스키마
 │   ├── query/                  # 조회 전용 (detail, revisions)
@@ -146,17 +146,34 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 
 ## 6. 프론트/백엔드가 반드시 지켜야 할 4가지
 
-AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파트_팀_공유.md](AI_파트_팀_공유.md) §4에 있습니다.
+AI 파트가 실측으로 확인한 함정입니다. 전부 실제로 부딪혀서 고친 것들이라, `Report`를
+화면에 옮길 때 같은 실수를 반복하지 않으려면 이 절만은 읽어야 합니다.
 
-1. **유사도 점수는 없습니다.** 검색 상위 20편의 코사인 유사도 폭이 0.013이라 1위와 20위가
-   사실상 같은 값입니다. "유사도 92%" 같은 UI를 만들면 안 되고, `rank`와
-   `match_type`(both/semantic/lexical)으로 표시합니다.
-2. **`confidence.level`이 `weak`이면 경고 배너가 필수**입니다. 이게 없으면 요리 레시피를
-   넣어도 ML 논문 20편을 자신 있게 내놓습니다.
-3. **리뷰 지적은 빈도순이 아니라 `is_distinctive` 기준**으로 강조합니다. 코퍼스 전체의
-   78.8%가 baselines 지적을 받으므로 "20편 중 17편"은 정보량이 0입니다.
-4. **`is_coverage_biased`가 true인 학회는 채택률 절대 수치를 노출하지 않습니다.**
-   NeurIPS는 코퍼스의 95%가 accept로 보이지만 실제 채택률은 ~25%입니다.
+**① 유사도 점수는 만들 수 없습니다.**
+SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 안 됩니다 — 1위든 20위든
+사실상 같은 값이라, 어떤 변환을 해도 순위를 정당화할 점수가 나오지 않습니다.
+→ `similar_papers[]`에는 점수 대신 `rank`와 `match_type`(`semantic`/`lexical`/`both` —
+왜 걸렸는지)이 들어갑니다. **"유사도 92%" 같은 UI는 만들면 안 됩니다.**
+
+**② 대신 "이 검색 결과를 믿어도 되는지"는 잘 갈립니다.**
+논문 개별 점수는 못 갈라도, 쿼리가 우리 도메인(ML/AI 논문) 안에 있는지는 뚜렷합니다 —
+도메인 안은 top-5 평균 코사인 **0.946~0.966**, 밖은 **0.852~0.867**로 겹치지 않습니다.
+→ `confidence.level`(strong/moderate/weak)과 `is_reliable`을 확인해 **`weak`이면 경고
+배너가 필수**입니다. 없으면 요리 레시피를 넣어도 ML 논문 20편을 자신 있게 내놓습니다.
+
+**③ 리뷰 지적은 빈도순으로 세우면 안 됩니다.**
+"20편 중 17편이 baselines 지적"은 중요해 보이지만, 코퍼스 전체의 **78.8%**가 같은 지적을
+받습니다 — 정보량이 사실상 0입니다.
+→ `ReviewPattern`의 `lift`(코퍼스 평균 대비), `is_distinctive`, 그리고 그 지적을 받은 논문
+vs 안 받은 논문의 당락 차이(`is_contrast_significant`) 기준으로 강조하세요.
+
+**④ 점수·채택률은 절대값으로 보여주면 안 됩니다.**
+- 척도가 학회마다 다릅니다 (ICLR 2020만 1~8점, 나머지는 1~10점).
+- NeurIPS는 OpenReview가 채택 논문 위주로만 공개해 코퍼스의 **95%가 accept로 보이지만
+  실제 채택률은 ~25%**입니다.
+→ `rating_vs_venue`(학회 평균 대비), `rating_vs_threshold`(당락 경계 대비),
+`accept_lift`(코퍼스 대비) 같은 **상대값**만 씁니다. `is_coverage_biased`가 true인
+학회는 채택률 절대 수치를 노출하지 마세요.
 
 ## 7. 구현 완료 API 목록
 
@@ -211,17 +228,24 @@ rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signu
 
 ## 8. AI팀 연동 방식
 
-AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은 함수 네 개입니다.
+AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은
+함수 여섯 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
 
 ```python
 from paper_assistant import (
-    analyze, get_paper_detail, get_paper_reviews, get_paper_revisions)
+    analyze, get_paper_detail, get_paper_reviews, get_paper_revisions,
+    list_papers, extract_pdf_title_abstract)
 
 report   = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report
 detail   = get_paper_detail(paper_id)        # -> PaperDetail | None    (DB만)
 reviews  = get_paper_reviews(paper_id)       # -> list[ReviewDetail] | None
 revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API)
+listing  = list_papers(venue=..., year=..., field=..., q=..., limit=, offset=)
+title, abstract = extract_pdf_title_abstract(pdf_bytes)   # PDF 업로드 경로용
 ```
+
+무거운 의존성(torch 등)은 서버 기동이 아니라 **첫 호출 때** 로드되도록 전부 지연
+import입니다 — `import paper_assistant` 자체는 가볍습니다.
 
 - `get_paper_revisions()`만 **외부 네트워크(OpenReview API)** 를 탑니다. papers 테이블은
   openreview_id로 upsert해서 최신 버전만 남기 때문에 과거 버전이 DB에 없습니다.

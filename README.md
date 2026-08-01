@@ -11,22 +11,22 @@ ML/AI 논문 리서치 어시스턴트 — 백엔드(FastAPI) + AI 분석 파이
 | 폴더 | 담당 | 역할 |
 |---|---|---|
 | `app/` | 백엔드 | FastAPI 앱 — 인증, 초안 CRUD, 분석 요청/조회, 코퍼스 조회 API |
-| `alembic/` | 백엔드 | 서비스 테이블(users/submissions/분석 결과) 마이그레이션 |
-| `paper_assistant/` | AI | 검색·분석 파이프라인. 공개 API는 함수 4개뿐 |
+| `alembic/` | 백엔드 | 서비스 테이블(users/submissions/온보딩/분석 결과) 마이그레이션 |
+| `paper_assistant/` | AI | 검색·분석 파이프라인. 공개 API는 함수 6개뿐 |
 | `scripts/` | AI | 코퍼스 스키마(`init_db.sql`)와 운영 배치 (수집·집계·복원) |
 | `tests/` | 공통 | `tests/app`(백엔드) + `tests/paper_assistant`(AI) |
-| `docs/` | 공통 | 설계서·팀 공유 문서·개발 문서 |
+| `docs/` | 공통 | 개발 문서 2개 (아래 "문서" 참고) |
 
-화면(프론트엔드)은 이 저장소가 아니라 별도 저장소
-[AICE-FE](https://github.com/AICE-GACHON/AICE-FE)에 있습니다 — 아래 "8. 프론트엔드
-함께 띄우기" 참고.
+**화면(프론트엔드)은 이 저장소에 없습니다.** 별도 저장소
+[AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React)이고, 아래
+"8. 프론트엔드 함께 띄우기"대로 나란히 실행합니다.
 
 두 파트는 **같은 PostgreSQL 하나**를 씁니다. 논문 코퍼스 테이블(`papers`, `reviews`,
 `review_points` …)은 `scripts/init_db.sql`이, 서비스 테이블(`users`, `submissions` …)은
 alembic이 관리합니다. 자세한 경계는 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 참고.
 
 환경변수는 **`paper_assistant/config.py`가 공유 값(DB·LLM 토글)의 단일 소스**이고,
-`app/core/config.py`는 백엔드 전용 값(JWT·CORS)만 선언합니다.
+`app/core/config.py`는 백엔드 전용 값(JWT·CORS·구글 로그인)만 선언합니다.
 
 ## 로컬 실행
 
@@ -37,16 +37,17 @@ Python 3.13+ 기준입니다 (3.14에서도 동작 확인).
 ```bash
 python -m venv venv
 venv\Scripts\activate
+```
+
+⚠️ **torch를 먼저, CPU 휠로 설치하세요.** 순서를 바꾸면 requirements가 기본 CUDA
+빌드(수 GB)를 받아버립니다. GPU는 필요 없습니다.
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements-dev.txt
 ```
 
 배포 환경이면 테스트 도구가 빠진 `requirements.txt`를 쓰세요.
-
-torch는 CPU 휠로 충분합니다 (GPU 불필요, 용량 절약):
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-```
 
 ### 2. 환경변수
 
@@ -56,6 +57,9 @@ cp .env.example .env
 
 `DATABASE_URL`은 기본값(포트 **5433**) 그대로 두세요. 일반 PostgreSQL(5432)을 가리키면
 vector 확장도 논문 코퍼스도 없어서 분석이 전부 실패합니다.
+
+`JWT_SECRET_KEY`만 아무 값으로 채우면 서버가 뜹니다. `GOOGLE_CLIENT_ID`는 구글 로그인을
+쓸 때만 필요하고, 비어 있으면 `POST /api/auth/google`이 401을 반환합니다.
 
 ### 3. DB 띄우기
 
@@ -102,22 +106,26 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
+198개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
 ### 8. 프론트엔드 함께 띄우기
 
-화면은 **별도 저장소** [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React,
-`paper-trace`)입니다. 백엔드와 나란히 클론해서 각각 띄웁니다.
+백엔드와 나란히 클론해서 각각 띄웁니다.
 
 ```bash
 git clone https://github.com/AICE-GACHON/AICE-FE.git
 cd AICE-FE && npm install && npm run dev
 ```
 
-프론트는 `.env`의 `VITE_API_BASE_URL`로 백엔드를 찾습니다 (기본 `http://localhost:8000`).
-**이 값이 비어 있으면 화면이 전부 mock 응답으로 돌아가므로**, 실제 연동을 확인할 때는
-반드시 채워져 있어야 합니다.
+프론트는 `.env`의 `VITE_API_BASE_URL`로 백엔드를 찾습니다.
+
+```
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+⚠️ **이 값이 비어 있으면 화면이 전부 mock 응답으로 돌아갑니다.** 백엔드를 껐는데도
+화면이 멀쩡히 동작한다면 십중팔구 이것 때문입니다.
 
 | | 주소 |
 |---|---|
@@ -130,9 +138,13 @@ cd AICE-FE && npm install && npm run dev
 ## 핵심 흐름
 
 ```
-POST /api/auth/signup  →  POST /api/auth/login  (JWT)
+POST /api/onboarding                       (선택) 가입 전 익명 온보딩 → onboarding_id
         ↓
-POST /api/submissions                      내 논문 초안 등록
+POST /api/auth/signup  →  POST /api/auth/login  (JWT)
+        ↑ onboarding_id를 실어 보내면 그 답변이 계정에 연결됨
+        ↓
+POST /api/submissions                      내 논문 초안 등록 (JSON)
+POST /api/submissions/pdf                  또는 PDF 업로드 (제목·초록 자동 추출)
         ↓
 POST /api/submissions/{id}/analysis        분석 시작 → 202, status=pending
         ↓  (백그라운드에서 paper_assistant.analyze() 실행)
@@ -143,13 +155,15 @@ GET  /api/papers/{paper_id}/reviews        그 논문이 받은 리뷰만 (가�
 GET  /api/papers/{paper_id}/revisions      그 논문의 저자가 리뷰 후 무엇을 고쳤는지
 ```
 
+전체 엔드포인트 목록은 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §7 또는 Swagger에 있습니다.
+
 `/revisions`만 OpenReview API를 실시간으로 조회합니다 — 느리고 실패할 수 있으니
 사용자가 '수정 이력'을 눌렀을 때만 호출하세요.
 
 ## 프론트가 특히 주의할 것
 
-AI 파트가 실측으로 확인한 함정이라 UI에 그대로 반영해야 합니다. 근거와 수치는
-[docs/AI_파트_팀_공유.md](docs/AI_파트_팀_공유.md) §4에 있습니다.
+AI 파트가 실측으로 확인한 함정이라 UI에 그대로 반영해야 합니다. 수치와 근거는
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §6에 있습니다.
 
 - **"유사도 92%" 같은 UI를 만들면 안 됩니다.** 논문별 유사도 점수는 제공하지 않습니다
   (검색 상위 20개의 코사인 폭이 0.013이라 순위를 정당화할 점수가 안 나옵니다).
@@ -162,10 +176,19 @@ AI 파트가 실측으로 확인한 함정이라 UI에 그대로 반영해야 �
 
 ## 문서
 
-- **[docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) — 전체 설명본. 지금 무엇이 되고
-  무엇이 비어 있는지(실측 수치 + 남은 작업). 처음 읽는다면 여기부터.**
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 폴더 구조, 데이터 모델, API 목록, 파트 간 경계
-- [docs/AI_파트_팀_공유.md](docs/AI_파트_팀_공유.md) — AI 파트 요약 (프론트/백엔드용)
-- [docs/AI_파트_설계서.md](docs/AI_파트_설계서.md) — 설계 근거, 실험 수치, 실패한 접근
-- [docs/ML_AI_논문_RAG_서비스_기획서.md](docs/ML_AI_논문_RAG_서비스_기획서.md) — 서비스 기획
-- [docs/SETUP_LAPTOP.md](docs/SETUP_LAPTOP.md) — 다른 컴퓨터에서 이어서 작업할 때
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — 폴더 구조, 데이터 모델, API 목록,
+  AI 파트 연동 방식, 남은 작업. **처음 읽는다면 여기부터.**
+- [docs/AI_파트_설계서.md](docs/AI_파트_설계서.md) — AI 파트가 **왜** 이렇게 됐는지.
+  설계 근거, 실측 수치, 실패한 접근, 검색 정확도 평가 결과(§24).
+
+## 알려진 한계
+
+정직하게 적어둡니다. 자세한 근거는 설계서에 §번호로 있습니다.
+
+- **검색이 aspect 예측에서 '검색 없음' 베이스라인에 집니다** (0.66~0.78배, §24).
+  다만 구체적인 지적 *문장*을 근거로 가져오는 것은 잘 됩니다 — 강점은 범주 예측이
+  아니라 **근거 제시**입니다.
+- **인용은 라벨의 실재성만 검증됩니다** (§23.5). 인용된 원문이 그 문장을 실제로
+  뒷받침하는지는 미검증이라, 화면에서 원문을 함께 펼쳐 사용자가 대조하게 해야 합니다.
+- arXiv/S2 보강은 코드만 있고 아직 실행하지 않았습니다.
+- 배포 설정(Dockerfile 등)은 없습니다.

@@ -244,7 +244,7 @@ def get_analysis(
     """가장 최근 분석의 상태와 결과를 돌려준다 (폴링 대상).
 
     status가 done이면 report에 분석 결과 전체가, failed면 error에 사유가 들어갑니다.
-    report를 화면에 옮길 때 주의할 점은 docs/AI_파트_팀_공유.md §4를 꼭 읽어주세요 —
+    report를 화면에 옮길 때 주의할 점은 docs/DEVELOPMENT.md §6을 꼭 읽어주세요 —
     특히 confidence.level이 weak이면 경고 없이 결과만 보여주면 안 됩니다.
     """
     _owned_submission(db, submission_id, current_user)
