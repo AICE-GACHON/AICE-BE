@@ -166,10 +166,10 @@ SPECTER2는 논문 title+abstract용 모델이라 짧은 리뷰 문장의 유사
 
 ### 4.1 프론트 연동 전에 채워야 하는 것
 
-**① PDF 업로드 경로가 백엔드에 없다** ← 가장 큰 구멍
-`analyze(pdf_bytes=...)`는 PDF에서 제목/초록을 뽑을 수 있고 `demo/`는 그걸 쓴다.
-그런데 `POST /api/submissions`는 JSON만 받는다. 기획서의 주요 입력 방식인데
-백엔드 API로는 도달할 수 없다. multipart 경로가 필요하다.
+**① ~~PDF 업로드 경로가 백엔드에 없다~~ → 해결됨**
+`POST /api/submissions/pdf`(multipart)가 추가됐다. `title`/`abstract`를 비워 보내면
+서버가 `paper_assistant.extract_pdf_title_abstract`로 채운다 — `analyze(pdf_bytes=...)`가
+내부에서 쓰는 것과 같은 추출기다.
 
 **② `submissions.content`와 `field`가 저장만 되고 쓰이지 않는다**
 `run_analysis`는 `analyze(title=..., abstract=...)`만 부른다. 본문 전체(`content`)와
@@ -274,8 +274,8 @@ previous results"(칭찬)나 "**Summary** This paper proposes …"(요약)가 �
 4. **`content`/`field`를 살릴 것인가 뺄 것인가** (§4.1-②).
 5. **배포 환경** — Dockerfile도 프로덕션 설정도 아직 없다. 어디에 올릴지가 정해지면
    워커 분리(§4.2)와 함께 설계해야 한다.
-6. **프론트 프레임워크와 담당** — 정해지면 `demo/`를 지우고 CORS origin을 실제
-   도메인으로 바꾼다.
+6. **프론트 배포 도메인** — 로컬 연동(Vite 5173)은 끝났고, 배포처가 정해지면
+   `CORS_ORIGINS`를 실제 도메인으로 바꾼다.
 7. **지적항목 단위 검색을 붙일 것인가** (§8 마지막) — 검색 단위를 논문에서 문장으로
    내리는 작업. 문장용 임베딩 모델 + 96만 건 재임베딩(몇 시간)이 필요하다.
 8. **인용의 의미 일치를 검증할 것인가** (§8) — 지금은 라벨 실재만 확인한다. 인용
@@ -297,15 +297,15 @@ previous results"(칭찬)나 "**Summary** This paper proposes …"(요약)가 �
 | 근거 추적 (RAG grounding) | ✅ 링크 유효성 검증까지. 의미 일치 검증은 미구현 (§8) |
 | 검색 정확도 | 🟡 평가 도구는 있음. **결과가 나쁘다** (§9) |
 | 백엔드 API (인증/초안/분석/코퍼스) | ✅ 동작 |
-| 테스트 | ✅ 165개 (CI는 없음) |
+| 테스트 | ✅ 198개 (CI는 없음) |
 | arXiv/S2 보강 | ⬜ 코드는 있고 **미실행** |
-| PDF 업로드 API | ⬜ 없음 (AI 파트는 지원) |
+| PDF 업로드 API | ✅ `POST /api/submissions/pdf` |
 | 초안 수정·분석 이력 API | ⬜ 없음 |
-| 프론트 | 🟡 임시 데모만 (`demo/`) |
+| 프론트 | ✅ 별도 저장소 [AICE-FE](https://github.com/AICE-GACHON/AICE-FE) 연동 (임시 `demo/`는 삭제) |
 | 배포 | ⬜ 없음 |
 
-**한 줄로**: AI 파트와 백엔드 API는 실제로 돌아가는 상태이고, 남은 건
-**프론트 연동 + 입력 경로(PDF) 보강 + 배포**다.
+**한 줄로**: AI 파트·백엔드 API·프론트가 실제로 연결돼 돌아가는 상태이고, 남은 건
+**검색 정확도 개선(§9) + 배포**다.
 
 ---
 
@@ -360,7 +360,7 @@ previous results"(칭찬)나 "**Summary** This paper proposes …"(요약)가 �
 **의미 일치를 강제하려면 별도 검증 단계**(인용 문장 ↔ 원문 대조)가 필요하다.
 
 그래서 프론트는 인용을 '검증된 사실'로 표시하지 말고, **원문을 함께 펼쳐
-사용자가 직접 대조하게** 해야 한다 (`demo/`가 그렇게 렌더링한다).
+사용자가 직접 대조하게** 해야 한다.
 
 ### 발표에서 이렇게 말하면 정확하다
 

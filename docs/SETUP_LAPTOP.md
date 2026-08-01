@@ -38,14 +38,21 @@ cp .env.example .env
 docker compose up -d              # pgvector 컨테이너 (포트 5433)
 bash scripts/restore_db.sh        # dump 복원 (PowerShell이면 아래 '수동 복원' 참고)
 
-# 6. 데모 화면 실행 (시연용 — 로그인 없이 초록/PDF만 넣으면 된다)
-uvicorn demo.server:app --port 8000
-#    → 브라우저 http://localhost:8000
+# 6. 서비스 테이블 생성 + 백엔드 실행
+alembic upgrade head
+uvicorn app.main:app --reload     # → http://localhost:8000 (Swagger /docs)
 ```
 
-데모 화면은 서비스 테이블(users/submissions)을 쓰지 않으므로 `alembic upgrade head`가
-필요 없습니다. 백엔드 API(`uvicorn app.main:app`, JWT 인증)까지 보여줄 거라면
-마이그레이션을 한 번 돌리세요.
+화면까지 보려면 별도 저장소 [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)를
+나란히 클론해 함께 띄웁니다 (백엔드 CORS에 5173이 이미 열려 있습니다).
+
+```bash
+git clone https://github.com/AICE-GACHON/AICE-FE.git
+cd AICE-FE && npm install && npm run dev    # → http://localhost:5173
+```
+
+프론트의 `.env`에 `VITE_API_BASE_URL=http://localhost:8000`이 있어야 실제 백엔드를
+호출합니다 — 비어 있으면 화면이 전부 mock 응답으로 돌아갑니다.
 
 ### PowerShell에서 수동 복원 (restore_db.sh 대신)
 

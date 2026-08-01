@@ -13,6 +13,7 @@ import uuid
 import pytest
 from sqlalchemy import inspect, text
 
+from app.core.rate_limit import limiter
 from app.database import Base, SessionLocal, engine, get_db
 from app.main import app
 from app.routers import submissions as submissions_router
@@ -38,6 +39,15 @@ def _schema_ready() -> tuple[bool, str]:
 
 _READY, _REASON = _schema_ready()
 pytestmark = pytest.mark.skipif(not _READY, reason=_REASON)
+
+
+@pytest.fixture(autouse=True)
+def _disable_rate_limit():
+    """인증 없는 엔드포인트(signup/login 10/분 등)를 테스트가 반복 호출하면 429가
+    난다. 테스트 동안만 끈다 (app/core/rate_limit.py)."""
+    limiter.enabled = False
+    yield
+    limiter.enabled = True
 
 
 @pytest.fixture
@@ -79,13 +89,20 @@ def _unique_email() -> str:
     return f"user-{uuid.uuid4().hex[:12]}@example.com"
 
 
+def _unique_openreview_id() -> str:
+    """openreview_id는 필수이자 unique다 (0006_unique_openreview_id).
+    테스트끼리 겹치면 409가 나므로 매번 새로 만든다."""
+    return f"~Test_User{uuid.uuid4().hex[:12]}1"
+
+
 @pytest.fixture
 def signup(client):
     """회원가입 + 로그인까지 마친 뒤 토큰을 돌려주는 헬퍼."""
     def _signup(password: str = "password123") -> dict:
         email = _unique_email()
         res = client.post("/api/auth/signup", json={
-            "email": email, "password": password, "nickname": "tester"})
+            "email": email, "password": password, "nickname": "tester",
+            "openreview_id": _unique_openreview_id()})
         assert res.status_code == 201, res.text
         token = client.post("/api/auth/login", json={
             "email": email, "password": password}).json()["data"]["access_token"]

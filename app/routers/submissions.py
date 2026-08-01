@@ -113,7 +113,7 @@ async def create_submission_from_pdf(
 ):
     """PDF로 초안을 올린다. title/abstract가 비어 있으면 PDF에서 추출한다
     (paper_assistant.extract_pdf_title_abstract — analyze(pdf_bytes=...)가 내부에서
-    쓰는 것과 같은 추출기, demo/server.py의 /api/analyze와 동일한 패턴).
+    쓰는 것과 같은 추출기).
     """
     is_pdf = pdf.content_type == "application/pdf" or (pdf.filename or "").lower().endswith(".pdf")
     if not is_pdf:

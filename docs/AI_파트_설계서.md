@@ -664,18 +664,16 @@ Manifesto **Diego Calvanese, Angelo Casciani, ...**"처럼 저자가 제목에 �
 `_looks_garbled()`가 이를 감지해 경고 로그를 남기며, 이 경우 제목/초록 직접
 입력이 확실한 경로다.
 
-### 16.2 데모 웹 서버 (`demo/`) — 독립·삭제 가능
+### 16.2 데모 웹 서버 (`demo/`) — **삭제됨 (역할 종료)**
 
-팀 시연용 임시 화면. **AI 파트와 완전 독립** — `paper_assistant.analyze()` 하나만
-호출한다(= 백엔드 통합 계약 그대로 시연). 실제 프론트 준비 시 `demo/` 폴더째 삭제.
+팀 시연용 임시 화면이었다. `paper_assistant.analyze()` 하나만 호출해 백엔드 통합
+계약을 그대로 시연했고, "분자 특성 예측 GNN" 쿼리로 유사 논문 20편·리뷰 패턴
+(baselines 19/20 등)·게재 경향이 정상 렌더되는 것까지 브라우저로 확인했다 —
+계약이 실제로 동작함을 입증한 뒤 소임을 다했다.
 
-- FastAPI(`demo/server.py`) + 단일 HTML(`demo/static/index.html`)
-- 텍스트(제목+초록) 또는 PDF 업로드 → 유사논문·리뷰패턴·게재경향·재투고흐름 렌더
-- 기본 무료 모드($0), "AI 요약·태깅" 체크 시 Claude 호출
-- `python -m uvicorn demo.server:app --port 8000`
-
-**브라우저 end-to-end 검증 완료**: "분자 특성 예측 GNN" 쿼리 → 유사 GNN 논문 20편,
-리뷰 패턴(baselines 19/20 등), 게재 경향 정상 렌더. 백엔드 계약이 실제로 동작함을 확인.
+실제 프론트([AICE-FE](https://github.com/AICE-GACHON/AICE-FE), Vite + React) 연동이
+끝나면서 예정대로 폴더째 삭제했다. 계약을 화면에 옮긴 참고 구현이 필요하면 이제
+AICE-FE의 `src/workspace/report/`를 보면 된다.
 
 ---
 
@@ -1014,11 +1012,11 @@ python scripts/run_enrichment.py      # 하베스트 → arXiv 매칭 → S2 보
 - **`demo/requirements.txt`** — fastapi·uvicorn·python-multipart 세 줄뿐이었고 셋 다
   백엔드가 생기면서 루트 `requirements.txt`에 들어갔다.
 
-`demo/` 자체는 **남긴다.** 한 번 지웠다가 되살렸다 — 백엔드가 같은 계약을 구현했으니
-중복이라고 판단했지만, 분석 결과를 **눈으로 볼 수 있는 화면이 이것뿐**이라는 점을
-놓쳤다. Swagger는 JSON을 보여줄 뿐 §4의 표시 규칙(신뢰도 경고, 유사도 % 금지,
-lift 기준 강조)이 화면에서 어떻게 보여야 하는지 알려주지 못한다. 프론트 연동이
-끝나는 시점에 지운다.
+`demo/` 자체는 한동안 **남겼다.** 한 번 지웠다가 되살린 적이 있다 — 백엔드가 같은
+계약을 구현했으니 중복이라고 판단했지만, 분석 결과를 **눈으로 볼 수 있는 화면이
+이것뿐**이라는 점을 놓쳤다. Swagger는 JSON을 보여줄 뿐 §4의 표시 규칙(신뢰도 경고,
+유사도 % 금지, lift 기준 강조)이 화면에서 어떻게 보여야 하는지 알려주지 못한다.
+예고한 대로 **프론트(AICE-FE) 연동이 끝난 시점에 삭제했다** (§16.2).
 
 ### 22.2 실제로 위험했던 것
 

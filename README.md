@@ -16,7 +16,10 @@ ML/AI 논문 리서치 어시스턴트 — 백엔드(FastAPI) + AI 분석 파이
 | `scripts/` | AI | 코퍼스 스키마(`init_db.sql`)와 운영 배치 (수집·집계·복원) |
 | `tests/` | 공통 | `tests/app`(백엔드) + `tests/paper_assistant`(AI) |
 | `docs/` | 공통 | 설계서·팀 공유 문서·개발 문서 |
-| `demo/` | AI | 임시 프론트 — 프론트 연동 전까지 결과를 눈으로 보는 화면 (독립 실행) |
+
+화면(프론트엔드)은 이 저장소가 아니라 별도 저장소
+[AICE-FE](https://github.com/AICE-GACHON/AICE-FE)에 있습니다 — 아래 "8. 프론트엔드
+함께 띄우기" 참고.
 
 두 파트는 **같은 PostgreSQL 하나**를 씁니다. 논문 코퍼스 테이블(`papers`, `reviews`,
 `review_points` …)은 `scripts/init_db.sql`이, 서비스 테이블(`users`, `submissions` …)은
@@ -102,17 +105,27 @@ pytest
 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
-### (선택) 데모 화면으로 결과 보기
+### 8. 프론트엔드 함께 띄우기
 
-프론트 연동 전까지는 `demo/`가 분석 결과를 눈으로 볼 수 있는 유일한 화면입니다.
-로그인 없이 초록/PDF만 넣으면 됩니다.
+화면은 **별도 저장소** [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React,
+`paper-trace`)입니다. 백엔드와 나란히 클론해서 각각 띄웁니다.
 
 ```bash
-uvicorn demo.server:app --port 8001
+git clone https://github.com/AICE-GACHON/AICE-FE.git
+cd AICE-FE && npm install && npm run dev
 ```
 
-백엔드(8000)와 **다른 앱**이므로 포트를 겹치지 않게 띄우세요. 자세한 내용은
-[demo/README.md](demo/README.md) 참고.
+프론트는 `.env`의 `VITE_API_BASE_URL`로 백엔드를 찾습니다 (기본 `http://localhost:8000`).
+**이 값이 비어 있으면 화면이 전부 mock 응답으로 돌아가므로**, 실제 연동을 확인할 때는
+반드시 채워져 있어야 합니다.
+
+| | 주소 |
+|---|---|
+| 백엔드 | http://localhost:8000 (Swagger `/docs`) |
+| 프론트 | http://localhost:5173 |
+
+백엔드 CORS 허용 목록(`app/core/config.py`의 `CORS_ORIGINS`)에 5173~5175가 이미
+들어 있습니다 — 5174/5175는 vite가 포트 충돌 시 자동으로 올라가는 자리입니다.
 
 ## 핵심 흐름
 

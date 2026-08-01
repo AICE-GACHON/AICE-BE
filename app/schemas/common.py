@@ -13,6 +13,11 @@ class TimestampMixin(BaseModel):
     created_at: datetime
 
 
+class Message(BaseModel):
+    """단순 메시지 응답 (로그아웃·탈퇴처럼 돌려줄 데이터가 안내 문구뿐일 때)."""
+    message: str
+
+
 DataT = TypeVar("DataT")
 
 

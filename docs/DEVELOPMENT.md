@@ -73,9 +73,6 @@ AICE/
 │   ├── app/                    # 백엔드 (인증·소유권·분석 상태 전이)
 │   ├── paper_assistant/        # AI 파트
 │   └── test_backend_auth.py    # 백엔드 인증/온보딩 연동 라우터 테스트
-├── demo/                     # 임시 프론트 (프론트 연동 전까지 유지, 독립 실행)
-│   ├── server.py               # paper_assistant만 호출 — 인증/DB 쓰기 없음
-│   └── static/index.html       # 단일 페이지 (폼 + 결과 렌더링)
 ├── docs/                     # 설계서·팀 공유 문서·개발 문서
 ├── alembic/versions/         # 0001 초기 테이블 … 0006 openreview_id unique (아래 §4 참고)
 ├── docker-compose.yml        # pgvector Postgres (포트 5433)
@@ -271,6 +268,10 @@ revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 
       (기본은 off — 로컬 개발에서 매 기동이 수십 초 느려집니다).
 - [ ] **워커 분리 검토** — `BackgroundTasks`는 API 프로세스 안에서 돕니다. 동시 분석이
       늘면 API 응답이 느려지므로, 트래픽이 생기면 별도 워커로 빼야 합니다.
-- [ ] **프론트 연동 테스트** — CORS/인증/응답 포맷 + 위 6번 4가지 규칙 반영 확인.
-      연동이 끝나면 `demo/`를 삭제한다 (그때까지는 결과를 볼 수 있는 유일한 화면이다).
+- [x] **프론트 연동** — [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React)를
+      연결했습니다. 온보딩 → 회원가입(온보딩 연결) → 로그인 → `/api/user/me`까지
+      브라우저에서 CORS 포함 확인했고, 이로써 역할이 끝난 `demo/`는 삭제했습니다.
+- [ ] **프론트에 6번 4가지 규칙 반영 확인** — 유사도 점수 미표시, `confidence.level=weak`
+      경고 배너, `is_distinctive` 기준 강조, `is_coverage_biased` 학회 채택률 비노출.
+      아직 화면에서 검증하지 않았습니다.
 - [ ] 코퍼스 DB 덤프 배포 경로 확정 (수 GB, git 불가).

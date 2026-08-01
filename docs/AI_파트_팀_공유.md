@@ -141,9 +141,10 @@ DB는 이미 43,515편 + 리뷰 168,217건 + 지적항목 125만 건 적재 완�
 | `citations` | 실제로 인용된 라벨 목록 | 지어낸 라벨은 걸러졌으므로 **링크는 항상 유효**하다. 다만 문장이 그 원문에서 나온 내용인지까지는 검증되지 않으니, 원문을 함께 보여줘 사용자가 판단하게 할 것 |
 | `used_llm` | 이 리포트가 실제 LLM 호출로 나왔는지 | 근거 추적용. `false`면 태깅·요약이 스텁이다 |
 
-데모 화면(`demo/`)이 이 계약을 그대로 쓰는 참고 구현이다 — `demo/server.py`,
-`demo/static/index.html`을 보면 각 필드를 어떻게 화면에 배치했는지 바로 알 수 있다.
-프론트 연동이 끝나면 `demo/` 폴더는 통째로 지워도 된다(독립 폴더).
+이 계약을 실제로 화면에 옮긴 구현은 별도 저장소
+[AICE-FE](https://github.com/AICE-GACHON/AICE-FE)의 `src/workspace/report/`에 있다
+(`SimilarPapers.jsx`, `ReviewPatterns.jsx`, `ConfidenceBanner.jsx` 등이 각 섹션에 대응).
+참고용이던 `demo/` 폴더는 프론트 연동이 끝나 삭제했다.
 
 백엔드가 이 계약을 감싸 노출하는 실제 엔드포인트 목록은
 [DEVELOPMENT.md](DEVELOPMENT.md) §7에 있다 (Swagger는 `/docs`).
