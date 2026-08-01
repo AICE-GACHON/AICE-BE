@@ -15,8 +15,8 @@
 붙이지 말고 '리뷰 본문' 한 덩어리로 표시해야 합니다.
 """
 from paper_assistant.schemas import (
-    DiffSegment, FieldChange, PaperDetail, PaperRevisions, ReviewDetail,
-    ReviewPointDetail, RevisionEntry)
+    DiffSegment, FieldChange, PaperDetail, PaperListResponse, PaperRevisions,
+    PaperSummary, ReviewDetail, ReviewPointDetail, RevisionEntry)
 
 # 백엔드 응답 이름으로 쓰는 별칭
 PaperResponse = PaperDetail
@@ -26,6 +26,8 @@ RevisionsResponse = PaperRevisions
 
 __all__ = [
     "PaperResponse",
+    "PaperListResponse",
+    "PaperSummary",
     "ReviewResponse",
     "RevisionsResponse",
     "PaperDetail",

@@ -1,14 +1,17 @@
 """paper_assistant — ML/AI 논문 리서치 어시스턴트 (AI 파트).
 
-공개 API (백엔드 통합 계약) 네 가지가 전부다.
+공개 API (백엔드 통합 계약).
 
     from paper_assistant import (
-        analyze, get_paper_detail, get_paper_reviews, get_paper_revisions)
+        analyze, get_paper_detail, get_paper_reviews, get_paper_revisions,
+        list_papers, extract_pdf_title_abstract)
 
     report  = analyze(title, abstract)      # -> Report (무겁다: 임베딩+검색+집계)
     detail  = get_paper_detail(paper_id)    # -> PaperDetail | None  (DB 조회만)
     reviews = get_paper_reviews(paper_id)   # -> list[ReviewDetail] | None
     revs    = get_paper_revisions(paper_id) # -> PaperRevisions | None (외부 API)
+    listing = list_papers(...)              # -> PaperListResponse (DB 조회만)
+    title, abstract = extract_pdf_title_abstract(pdf_bytes)  # PDF -> (title, abstract)
 
 무거운 의존성(torch 등)을 서버 기동이 아니라 첫 호출 때 로드하기 위해 전부
 지연 import한다. 타입 정보는 TYPE_CHECKING 블록으로 유지한다.
@@ -17,13 +20,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:   # 런타임에는 임포트하지 않는다 (torch 로드 회피)
     from paper_assistant.schemas import (
-        PaperDetail, PaperRevisions, Report, ReviewDetail)
+        PaperDetail, PaperListResponse, PaperRevisions, Report, ReviewDetail)
 
 __all__ = [
     "analyze",
     "get_paper_detail",
     "get_paper_reviews",
     "get_paper_revisions",
+    "list_papers",
+    "extract_pdf_title_abstract",
 ]
 
 
@@ -55,6 +60,21 @@ def get_paper_reviews(paper_id: int) -> "list[ReviewDetail] | None":
     """
     from paper_assistant.query.detail import get_paper_reviews as _fn
     return _fn(paper_id)
+
+
+def list_papers(*args, **kwargs) -> "PaperListResponse":
+    """venue/year/field/q로 코퍼스 논문 목록을 조회한다. DB 조회만 하므로 가볍다."""
+    from paper_assistant.query.detail import list_papers as _fn
+    return _fn(*args, **kwargs)
+
+
+def extract_pdf_title_abstract(*args, **kwargs):
+    """PDF 바이트 -> (title, abstract). analyze(pdf_bytes=...)가 내부에서 쓰는 것과
+    같은 추출기다 — 백엔드가 제목/초록만 필요할 때(POST /api/submissions/pdf) 전체
+    analyze()를 돌리지 않고 이 함수만 쓴다.
+    """
+    from paper_assistant.pdf.extract import extract_title_abstract as _extract
+    return _extract(*args, **kwargs)
 
 
 def get_paper_revisions(paper_id: int) -> "PaperRevisions | None":

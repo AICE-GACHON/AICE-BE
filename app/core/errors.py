@@ -9,6 +9,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 
 from app.schemas.common import ApiResponse, ErrorDetail
 
@@ -29,6 +30,12 @@ def register_exception_handlers(app: FastAPI) -> None:
                                     exc: HTTPException) -> JSONResponse:
         return error_response(exc.status_code, str(exc.status_code),
                               str(exc.detail), headers=exc.headers)
+
+    @app.exception_handler(RateLimitExceeded)
+    async def handle_rate_limit(request: Request,
+                                exc: RateLimitExceeded) -> JSONResponse:
+        return error_response(status.HTTP_429_TOO_MANY_REQUESTS, "429",
+                              "요청이 너무 많습니다. 잠시 후 다시 시도하세요.")
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request,

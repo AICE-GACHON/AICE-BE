@@ -6,16 +6,32 @@
 ⚠️ paper_id는 UUID가 아니라 BIGINT입니다. 분석 결과의
 similar_papers[].paper_id를 그대로 넘기면 됩니다.
 """
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.schemas.common import ApiResponse
-from app.schemas.corpus import PaperResponse, ReviewResponse, RevisionsResponse
-from paper_assistant import get_paper_detail, get_paper_reviews, get_paper_revisions
+from app.schemas.corpus import (
+    PaperListResponse, PaperResponse, ReviewResponse, RevisionsResponse)
+from paper_assistant import (
+    get_paper_detail, get_paper_reviews, get_paper_revisions, list_papers as _list_papers)
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
 
 _NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND, detail="논문을 찾을 수 없습니다.")
+
+
+@router.get("", response_model=ApiResponse[PaperListResponse])
+def list_papers(
+    venue: str | None = None,
+    year: int | None = None,
+    field: str | None = Query(default=None, description="papers.primary_area"),
+    q: str | None = Query(default=None, description="제목·초록 전문검색"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    """코퍼스 논문 목록. venue/year/field/q로 좁힐 수 있다 (전부 선택)."""
+    result = _list_papers(venue=venue, year=year, field=field, q=q, limit=limit, offset=offset)
+    return ApiResponse[PaperListResponse](data=result)
 
 
 @router.get("/{paper_id}", response_model=ApiResponse[PaperResponse])

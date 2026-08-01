@@ -43,12 +43,14 @@ AICE/
 │   ├── models/                 # SQLAlchemy 모델 — 서비스 테이블만
 │   │   ├── user.py               # users
 │   │   ├── submission.py         # submissions
-│   │   └── analysis.py           # review_predictions, similar_paper_matches
+│   │   ├── analysis.py           # review_predictions, similar_paper_matches
+│   │   └── onboarding.py         # onboarding_profiles
 │   ├── routers/
-│   │   ├── auth.py               # 회원가입/로그인
-│   │   ├── user.py               # 내 정보 조회
-│   │   ├── submissions.py        # 내 초안 CRUD + 분석 시작/조회 (핵심)
-│   │   └── corpus.py             # 코퍼스 논문·리뷰·수정 이력 (AI 파트 위임)
+│   │   ├── auth.py               # 회원가입/로그인/구글 로그인/refresh/logout
+│   │   ├── user.py               # 내 정보 조회/수정/탈퇴, 온보딩 조회
+│   │   ├── submissions.py        # 내 초안 업로드(JSON/PDF)·조회·삭제 + 분석 시작/조회 (핵심)
+│   │   ├── corpus.py             # 코퍼스 논문 목록/상세/리뷰/수정 이력 (AI 파트 위임)
+│   │   └── onboarding.py         # 회원가입 전 익명 온보딩 답변 저장
 │   ├── schemas/                # Pydantic 요청/응답 스키마
 │   │   ├── common.py             # ApiResponse[T]
 │   │   ├── auth.py / submission.py / analysis.py
@@ -66,15 +68,16 @@ AICE/
 │   │   └── _http.py              # 세 API 클라이언트가 공유하는 재시도 뼈대
 │   ├── pdf/                    # PDF에서 제목/초록 추출
 │   └── db/                     # 커넥션 풀 + 적재 + 코퍼스 통계 캐시(stats.py)
-├── scripts/                  # 코퍼스 스키마(init_db.sql) + 운영 배치 7개
+├── scripts/                  # 코퍼스 스키마(init_db.sql) + 운영 배치 + cleanup_stale_onboarding.py
 ├── tests/
 │   ├── app/                    # 백엔드 (인증·소유권·분석 상태 전이)
-│   └── paper_assistant/        # AI 파트
+│   ├── paper_assistant/        # AI 파트
+│   └── test_backend_auth.py    # 백엔드 인증/온보딩 연동 라우터 테스트
 ├── demo/                     # 임시 프론트 (프론트 연동 전까지 유지, 독립 실행)
 │   ├── server.py               # paper_assistant만 호출 — 인증/DB 쓰기 없음
 │   └── static/index.html       # 단일 페이지 (폼 + 결과 렌더링)
 ├── docs/                     # 설계서·팀 공유 문서·개발 문서
-├── alembic/versions/         # 0001 초기 테이블, 0002 timestamptz + 중복 분석 방지
+├── alembic/versions/         # 0001 초기 테이블 … 0006 openreview_id unique (아래 §4 참고)
 ├── docker-compose.yml        # pgvector Postgres (포트 5433)
 ├── pyproject.toml            # pytest 설정 (pythonpath)
 ├── requirements.txt          # 런타임 의존성
@@ -89,18 +92,32 @@ DB는 하나지만 **소유자가 둘로 나뉩니다.** 이 경계를 넘지 �
 [ 서비스 테이블 — alembic이 관리 ]        [ 논문 코퍼스 — scripts/init_db.sql이 관리 ]
 
 users ──< submissions                     papers ──< reviews ──< review_points
-              │                             │  └──< paper_authors >── authors
-              └──< review_predictions       │  └──< submission_links (재투고 흐름)
-                        │                   venue_stats, aspect_base_rates, citations
-                        └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
+  │           │                             │  └──< paper_authors >── authors
+  │           └──< review_predictions       │  └──< submission_links (재투고 흐름)
+  │                     │                   venue_stats, aspect_base_rates, citations
+  │                     └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
+  └──< onboarding_profiles (1:1, user_id nullable — 회원가입 전엔 주인 없음)
 ```
 
 ### 서비스 테이블
-- **users**: 회원. 이메일/비밀번호 기반 인증.
+- **users**: 회원. 이메일/비밀번호 또는 구글(`google_sub`) 인증. `openreview_id`는
+  가입 경로와 무관하게 필수이며 **unique**입니다(서비스가 OpenReview 코퍼스 기반이라
+  신원 값으로 사용 — 두 계정이 같은 OpenReview 계정을 자처할 수 없게 잠갔습니다,
+  `alembic/versions/0006_unique_openreview_id.py`). `password_hash`는 구글 전용
+  계정이 있어 nullable입니다 (`alembic/versions/0004_add_google_and_openreview_id.py`).
+  `token_version`은 refresh_token 폐기용 버전 카운터로, 로그아웃 시 증가시켜 그
+  이전에 발급된 refresh_token을 전부 무효화합니다
+  (`alembic/versions/0003_add_user_token_version.py`).
 - **submissions**: 사용자가 올린 내 논문 초안. 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
   결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
 - **similar_paper_matches**: 그 분석이 근거로 삼은 유사 논문 목록 (`rank`, `match_type`).
+- **onboarding_profiles**: 회원가입 전 익명 상태에서 저장하는 온보딩 답변. `user_id`는
+  처음엔 null이고, 회원가입 요청(`SignupRequest.onboarding_id`)이 이 id를 실어 보내면
+  그때 연결됩니다 — 세션 쿠키 없이 스테이트리스 구조를 유지하기 위한 설계입니다
+  (`alembic/versions/0005_add_onboarding_profiles.py`). 회원가입 없이 이탈한
+  미연결 행은 `scripts/cleanup_stale_onboarding.py`로 주기적으로 정리하세요
+  (기본 30일 지난 행 삭제, `--dry-run`으로 미리 확인 가능).
 
 ### 논문 코퍼스 (AI 파트 소유, 43,515편)
 - **papers / reviews / review_points**: ICLR 2020–2025 + NeurIPS 2021–2024에서 수집한
@@ -127,7 +144,8 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 
 - DB는 로컬 PostgreSQL이 아니라 `docker compose up -d`로 띄우는 **pgvector 인스턴스(5433)** 입니다.
 - 논문 코퍼스는 git에 없습니다. `scripts/restore_db.sh`로 DB 덤프를 복원해야 합니다.
-- `alembic upgrade head`는 서비스 테이블 4개만 만듭니다.
+- `alembic upgrade head`는 서비스 테이블 5개(`users`, `submissions`,
+  `review_predictions`, `similar_paper_matches`, `onboarding_profiles`)만 만듭니다.
 
 ## 6. 프론트/백엔드가 반드시 지켜야 할 4가지
 
@@ -150,18 +168,27 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 
 | 도메인 | 메서드/경로 | 설명 | 인증 |
 |---|---|---|---|
-| Auth | `POST /api/auth/signup` | 회원가입 | - |
-| Auth | `POST /api/auth/login` | 로그인, JWT 발급 | - |
+| Auth | `POST /api/auth/signup` | 회원가입 (openreview_id 필수, onboarding_id로 온보딩 답변 연결 선택) | - |
+| Auth | `POST /api/auth/login` | 로그인, access_token + refresh_token 발급 | - |
+| Auth | `POST /api/auth/google` | 구글 로그인/연동 (id_token 검증, 신규 가입 시 openreview_id 필수) | - |
+| Auth | `POST /api/auth/refresh` | refresh_token으로 access_token 재발급 (refresh_token도 회전) | - |
+| Auth | `POST /api/auth/logout` | 로그아웃 (User.token_version 증가 → 이전 refresh_token 전부 무효화) | 필요 |
 | User | `GET /api/user/me` | 내 정보 조회 | 필요 |
-| Submission | `POST /api/submissions` | 내 논문 초안 업로드 | 필요 |
+| User | `PATCH /api/user/me` | 내 정보 수정 (nickname, openreview_id) | 필요 |
+| User | `DELETE /api/user/me` | 회원 탈퇴 (submissions 이하 CASCADE 삭제) | 필요 |
+| User | `GET /api/user/me/onboarding` | 내 온보딩 답변 조회 (마이페이지) | 필요 |
+| Submission | `POST /api/submissions` | 내 논문 초안 업로드 (JSON) | 필요 |
+| Submission | `POST /api/submissions/pdf` | 내 논문 초안 업로드 (PDF, title/abstract 비면 추출) | 필요 |
 | Submission | `GET /api/submissions` | 내 초안 목록 (최신순, 본문 제외) | 필요 |
 | Submission | `GET /api/submissions/{id}` | 초안 상세 | 필요 |
 | Submission | `DELETE /api/submissions/{id}` | 초안 삭제 (분석 결과도 함께) → **204** | 필요 |
 | Submission | `POST /api/submissions/{id}/analysis` | 분석 시작 → **202**, status=pending | 필요 |
 | Submission | `GET /api/submissions/{id}/analysis` | 분석 상태/결과 조회 (폴링) | 필요 |
+| Corpus | `GET /api/papers` | 코퍼스 논문 목록 (venue/year/field/q 필터, limit/offset 페이지네이션) | - |
 | Corpus | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Corpus | `GET /api/papers/{paper_id}/reviews` | 그 논문의 리뷰 목록 | - |
 | Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
+| Onboarding | `POST /api/onboarding` | 회원가입 전 익명 온보딩 답변 저장 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
 `similar_papers[].paper_id`를 그대로 넘기면 됩니다.
@@ -171,6 +198,19 @@ AI 파트가 실측으로 확인한 함정입니다. 수치와 근거는 [AI_파
 ⚠️ 리뷰 목록 경로가 `GET /api/reviews?paper_id=`에서 `GET /api/papers/{paper_id}/reviews`로
 바뀌었습니다 (같은 리소스의 하위 경로가 맞고, 예전 경로는 상세 조회를 통째로 돌린 뒤
 리뷰만 꺼내 쓰느라 불필요한 쿼리 3개를 더 날렸습니다).
+
+기존 `POST /api/feedback/predictions`(501 반환)는 분석 시작/조회 두 개로 대체돼 삭제됐습니다.
+
+refresh_token은 JWT라 상태가 없어 개별 폐기가 불가능합니다. 대신 `users.token_version`
+(alembic `0003_add_user_token_version`)을 로그아웃 시 1 증가시키고, refresh_token 안에
+발급 시점의 버전을 담아 재발급 요청마다 비교합니다 — 어긋나면 거부합니다
+(`app/core/security.py`, `app/routers/auth.py`).
+
+인증 없이 열려 있는 엔드포인트(signup/login/google/refresh/onboarding)는 IP 기준
+rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signup/login/google
+10/분, refresh 20/분, onboarding 5/분. 저장소가 메모리라 워커를 여러 개로 늘리면
+워커별로 따로 세므로, 그때는 Redis 저장소로 바꿔야 합니다. 백엔드 테스트
+(`tests/test_backend_auth.py`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다.
 
 ## 8. AI팀 연동 방식
 
@@ -226,8 +266,6 @@ revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 
 
 ## 10. 남은 작업
 
-- [ ] **PDF 업로드** — `analyze(pdf_bytes=...)`는 이미 PDF에서 제목/초록을 추출할 수 있는데,
-      `POST /api/submissions`가 JSON만 받습니다. multipart 업로드 경로를 추가해야 합니다.
 - [ ] **분석 대기 UX** — 현재는 프론트 폴링입니다. 첫 요청이 특히 느리므로(모델 로드)
       배포 환경에서는 `.env`에 `WARMUP_ON_STARTUP=1`을 켜서 기동 시점으로 옮기세요
       (기본은 off — 로컬 개발에서 매 기동이 수십 초 느려집니다).

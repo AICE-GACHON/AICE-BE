@@ -19,16 +19,34 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # 프론트엔드 개발 서버 주소들. 배포 시 실제 프론트 도메인으로 교체.
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    # 프론트엔드 개발 서버 주소들 (콤마로 구분). 배포 시 실제 프론트 도메인으로 교체.
+    # 5174/5175는 vite가 5173 충돌 시 자동으로 올라가는 포트라 함께 열어둔다.
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+    ]
 
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
 
     # 기동 시 SPECTER2를 미리 로드할지. 켜면 첫 분석이 빨라지지만 매 기동이
     # 수십 초 느려진다 — 로컬 개발/테스트에서는 꺼두는 편이 낫다.
     WARMUP_ON_STARTUP: bool = False
+
+    # Google 로그인용 OAuth 클라이언트 ID (Google Cloud Console에서 발급).
+    # id_token 검증 시 audience로 쓰인다. 비어 있으면 POST /api/auth/google이
+    # 항상 401을 반환한다 (google_oauth.verify_google_id_token).
+    GOOGLE_CLIENT_ID: str = ""
+
+    # OpenReview 계정 — 논문 코퍼스 재수집 배치(scripts/, paper_assistant/ingest/)에서만
+    # 쓴다. 코퍼스는 이미 적재돼 있어 서버 운영에는 비어 있어도 된다.
+    # 실제로 이 값을 읽는 쪽은 paper_assistant/config.py다.
+    OPENREVIEW_USERNAME: str = ""
+    OPENREVIEW_PASSWORD: str = ""
 
     # --- AI 파트와 공유하는 값 (선언은 paper_assistant/config.py 한 곳뿐) ---
 
