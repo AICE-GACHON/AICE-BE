@@ -121,7 +121,12 @@ users ──< submissions                     papers ──< reviews ──< rev
   논문·리뷰·개별 지적 항목 (리뷰 168,217건, 지적항목 119만 건).
 - **venue_stats / aspect_base_rates**: 학회별 점수 기준선과 코퍼스 전체 지적 비율.
   "이 지적이 이 주제에서 특별히 두드러지는가"를 판단하는 분모입니다.
-- **submission_links**: 같은 논문의 재투고 추적 (ICLR reject → NeurIPS accept).
+- **submission_links**: 같은 논문의 재투고 추적 (ICLR reject → NeurIPS accept). 747건.
+- **arXiv/S2 보강 필드** (`papers.arxiv_id`·`s2_paper_id`·`citation_count`·`final_venue`,
+  `authors.s2_author_id`): 2026-08-02에 채웠습니다(설계서 §25). **코퍼스 전체를 덮지
+  않습니다** — `s2_paper_id` 기준 채택 논문 98.1% / 탈락 논문 38.2%이고, 전체로는
+  69.5%입니다. **`citation_count`와 `final_venue`는 아직 검색·분석이 읽지 않습니다.**
+  `citations`(인용 엣지)는 0행입니다.
 
 코퍼스 테이블에는 SQLAlchemy 모델이 없습니다. `alembic/env.py`의 `CORPUS_TABLES`가
 autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을 만들어도 코퍼스를 건드리지
@@ -324,4 +329,12 @@ import입니다 — `import paper_assistant` 자체는 가볍습니다.
 - [ ] **프론트에 6번 4가지 규칙 반영 확인** — 유사도 점수 미표시, `confidence.level=weak`
       경고 배너, `is_distinctive` 기준 강조, `is_coverage_biased` 학회 채택률 비노출.
       아직 화면에서 검증하지 않았습니다.
+- [x] **arXiv/S2 보강 실행** — 설계서 §20의 파이프라인을 2026-08-02에 전 단계
+      실행했습니다(결과는 §25). alembic `0008`로 `papers.citation_count` 드리프트를
+      먼저 복구해야 했습니다.
+- [ ] **보강 필드를 실제로 쓰기** — `citation_count`·`final_venue`가 채워졌지만 읽는
+      코드가 없습니다. 검색 랭킹 보정이나 논문 상세의 최종 게재처 표시 등 소비처를
+      정하는 것이 먼저이고, `--citations`(인용 엣지 적재)는 그 뒤에 돌리면 됩니다.
+- [ ] **코퍼스 중복 행 228쌍 정리** — 같은 논문이 같은 venue+year에 두 번 적재돼
+      있어 검색 결과에 중복 노출될 수 있습니다 (설계서 §25.5).
 - [ ] 코퍼스 DB 덤프 배포 경로 확정 (수 GB, git 불가).

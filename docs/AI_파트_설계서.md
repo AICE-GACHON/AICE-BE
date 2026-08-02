@@ -927,6 +927,9 @@ weak 판정이면 `is_reliable=False`, 요약 **첫 줄**에 경고, 데모는 �
 
 ## 20. arXiv ID 매칭 + Semantic Scholar 보강 (2026-07-26)
 
+> **이 절은 설계·구현만 다룬다. 실제로 돌린 결과는 §25(2026-08-02)에 있다.**
+> 아래 "전부 NULL"은 **구현 시점의 과거 상태**이고, 지금은 채워져 있다.
+
 §2.3의 `fetch_s2` / `fetch_arxiv` 단계가 그동안 비어 있었다 — `S2_API_KEY`는 config가
 읽기만 하고 아무도 쓰지 않았고, `papers.arxiv_id`/`s2_paper_id`는 43,515편 전부 NULL,
 `citations`는 0행이었다. 그 결과 재투고 매칭의 1순위(arXiv ID 일치, confidence 1.00)가
@@ -989,8 +992,12 @@ arXiv 쪽에서 대량으로 받아 로컬에서 하고, S2는 arXiv ID를 키�
 python scripts/run_enrichment.py      # 하베스트 → arXiv 매칭 → S2 보강 → 재투고 재계산
 ```
 
-(예전에는 `scripts/migrate_s2_fields.sql`을 먼저 돌려야 했다. 같은 내용이
-`init_db.sql`에 들어간 뒤로 불필요해져 §22에서 삭제했다.)
+⚠️ **`init_db.sql`에 컬럼을 넣는 것만으로는 이미 떠 있는 DB가 따라오지 않는다.**
+예전에는 `scripts/migrate_s2_fields.sql`을 먼저 돌렸고, 같은 내용이 `init_db.sql`에
+들어간 뒤 §22에서 삭제했다 — 그런데 `init_db.sql`은 **컨테이너 최초 기동 때 한 번만**
+실행되므로, 그 시점에 이미 살아 있던 DB에는 `citation_count`가 끝내 생기지 않았다.
+실제로 §25에서 이 문제로 S2 보강이 첫 UPDATE에서 죽었고, alembic `0008`로 복구했다.
+**코퍼스 테이블에 컬럼을 추가할 때는 `init_db.sql`과 마이그레이션을 항상 같이 쓸 것.**
 
 하베스트가 전체 시간의 대부분(2~3시간)이고 나머지는 10~20분. 모든 단계가 멱등이다.
 
@@ -1246,3 +1253,111 @@ is limited", "only 5 million molecules"). 즉 잘 되는 것은 **근거 제시*
 
 그 외: 표본 100~200편·시드 2개, aspect 9개라는 거친 입도, 텍스트 수준 적합성은
 측정하지 않음.
+
+
+## 25. §20을 실제로 돌렸다 — 실행 결과와 커버리지 (2026-08-02)
+
+§20은 구현까지만이고 한 번도 실행하지 않은 상태였다. 이 절은 전 단계를 처음으로
+끝까지 돌린 기록이다. 설계가 맞은 곳, 틀린 곳, 그리고 문서가 유도한 사고를 남긴다.
+
+### 25.1 시작하자마자 죽었다 — `init_db.sql`은 마이그레이션이 아니다
+
+`s2_enricher._apply_paper`의 `UPDATE papers SET ... citation_count = %s` 가
+`UndefinedColumn`으로 즉시 실패했다. `init_db.sql`에는 `citation_count INT`가 있는데
+**운영 DB의 `papers`에는 그 컬럼이 없었다.**
+
+원인은 §20.5에 적어둔 그 문장이다. 코퍼스 테이블은 alembic이 아니라 `init_db.sql`이
+만드는데, 이 파일은 **컨테이너 최초 기동 때 한 번만** 실행된다. 즉 파일에 컬럼을
+추가해도 이미 살아 있는 DB는 영원히 따라오지 않는다. 볼륨을 지우고 다시 만들지
+않는 한 드리프트가 고정된다.
+
+alembic `0008_papers_citation_count`로 복구했다. 두 갈래 모두에서 안전하도록
+`ADD COLUMN IF NOT EXISTS`(새 컨테이너는 `init_db.sql`이 이미 만들어 둠) +
+`to_regclass` 가드(코퍼스 없이 백엔드만 띄운 DB)를 걸었다.
+
+**교훈: 코퍼스 스키마를 바꿀 때 `init_db.sql`만 고치면 안 된다.** 신규 DB용과
+기존 DB용은 서로 다른 경로이고 둘 다 필요하다.
+
+### 25.2 실행 결과
+
+| 단계 | 결과 | 소요 |
+|---|---|---|
+| arXiv 하베스트 | cs 853,420 + stat 118,986 = **972,406건** (62.4MB gz) | 2h 53m |
+| arXiv 매칭 | 제목 일치 25,871 → **확정 25,384** (short_title 307, 동점 포기 487) | 11초 |
+| S2 by-arxiv | 대상 25,384 → **매칭 25,330 (99.8%)**, 저자 51,113 | 4분 |
+| S2 by-venue | 대상 18,185 → **매칭 4,908**, arxiv_id 642 추가, 저자 6,797 | 12분 |
+| 재투고 재계산 | 744 → **747건** (`arxiv_id` 387 / `title_exact` 178 / `fuzzy` 182) | 40초 |
+
+하베스트는 503 재시도가 **0건**이었고, S2는 429가 20건 났지만 전부 백오프로 흡수돼
+실패 0으로 끝났다. by-venue의 연속 실패 중단(`MAX_CONSECUTIVE_FAILURES`)은 발동하지
+않았다. 최종 상태:
+
+```
+papers 43,515편
+  arxiv_id        26,026  (59.8%)
+  s2_paper_id     30,238  (69.5%)
+  citation_count  30,238  (69.5%)
+  final_venue     25,426  (58.4%)
+authors  s2_author_id  57,910 / 84,270  (68.7%)
+citations  0행  (--citations 미실행)
+```
+
+매칭 정확도는 상위 인용 논문으로 확인했다 — ViT(2010.11929) 67,188회,
+RoBERTa(1907.11692) 30,712회, InstructGPT 22,976회, LoRA 21,508회가 각각 올바른
+arXiv id에 붙었다.
+
+### 25.3 커버리지가 당락으로 갈린다 — 그리고 그게 핵심이다
+
+| | 논문 | s2_paper_id | 비율 |
+|---|---|---|---|
+| 채택 | 22,732 | 22,296 | **98.1%** |
+| 탈락·철회·미상 | 20,783 | 7,942 | **38.2%** |
+
+§20.4가 예측한 "S2에는 채택 논문만 학회 venue로 색인되므로 reject/withdrawn은 거의
+못 잡는다"가 그대로 확인됐다. by-venue가 채운 4,908편은 사실상 전부 채택 논문이고,
+그래서 채택 커버리지만 76.7% → 98.1%로 뛰었다. **탈락 논문은 by-venue로 거의
+움직이지 않는다.**
+
+바꿔 말하면 **탈락 논문 7,942편의 S2 데이터는 전량 arXiv 경로로 들어왔다.**
+하베스트 3시간의 값어치가 여기 있다 — 이 서비스가 보여주려는 것이 "리젝된 논문이
+어떤 지적을 받았나"인데, 그 구간은 arXiv id 없이는 S2에 닿을 방법이 없다.
+RoBERTa가 ICLR 2020 **reject**이면서 인용 30,712회로 잡히는 것이 그 사례다.
+
+38.2%가 남은 이유는 재실행으로 해결되지 않는다 — 애초에 arXiv에 없거나(비공개
+투고), 제목이 25자 미만이거나, 동명 논문이라 안전하게 포기한 것들이다.
+
+### 25.4 재투고 링크 — 예측이 빗나간 곳
+
+실행 전 예상은 "**신규 링크 0건**, 기존 `title_exact`가 1.00으로 승격될 뿐"이었다.
+근거는 `arxiv_matcher`가 `submission_linker`와 **같은 `normalize_title` 완전 일치**를
+쓰므로, arXiv id를 공유하는 쌍은 이미 제목으로 잡힌 쌍과 같은 집합이라는 것이었다.
+실제로 `arxiv_matcher`만 놓고 보면 이 예상이 맞았다(378쌍 전부 기존 링크).
+
+빗나간 경로는 **by-venue**다. S2가 `externalIds.ArXiv`로 arxiv_id를 642개 역으로
+채우는데, S2는 자체 매칭을 쓰므로 **제목이 바뀐 재투고도 같은 arXiv id에 도달한다.**
+그 결과 제목 완전 일치 제약을 우회한 8쌍이 잡혔다:
+
+```
+Energy-based View of Retrosynthesis            ICLR 2021
+  → Towards understanding retrosynthesis by energy…   NeurIPS 2021
+Formalizing Generalization and Robustness…     ICLR 2021
+  → Formalizing Generalization and Adversarial R…     NeurIPS 2021
+Provably Robust Detection of OOD…              ICLR 2022
+  → Provably Adversarially Robust Detection of O…     NeurIPS 2022
+```
+
+규모는 작다(순증 3건, fuzzy에서 승격 3건). 다만 **제목을 갈아엎은 재투고는 다른
+방법으로 잡히지 않는다** — 제목 유사도(trgm 0.7)도 저자 Jaccard도 통과하지 못하는
+쌍이다. 재투고 추적을 더 넓히려면 이 경로를 키우는 것이 유일한 방향이다.
+
+### 25.5 남은 것
+
+- **`citations` 0행 유지.** `--citations`를 의도적으로 건너뛰었다. 요청 수가 가장
+  많은 단계(`REF_CHUNK=100`)인데, `citations` 테이블을 읽는 코드가 저장소에 아직
+  하나도 없다. 소비처가 생길 때 돌리면 된다.
+- **`citation_count` / `final_venue`도 아직 아무도 읽지 않는다.** 채워만 뒀고 검색
+  랭킹·리포트 어디에도 반영돼 있지 않다.
+- **코퍼스 중복 행 228쌍.** 같은 arxiv_id가 **같은 venue+year**에 두 번 들어가 있다
+  (예: "Diffusion Models Beat GANs on Image Synthesis" NeurIPS 2021 ×2). 재투고가
+  아니라 중복 적재이고, `submission_linker`는 `_different_submission`으로 걸러내므로
+  링크에는 영향이 없다. 다만 **검색 결과에 같은 논문이 두 번 뜰 수 있다.**
