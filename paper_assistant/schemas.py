@@ -180,6 +180,49 @@ class PaperRevisions(BaseModel):
     revisions: list[RevisionEntry] = Field(default_factory=list)
 
 
+class JourneyStop(BaseModel):
+    """재투고 궤적의 한 지점 — 같은 논문이 어느 학회에 내서 어떻게 됐는지."""
+    paper_id: int
+    openreview_id: str
+    title: str
+    venue: str
+    year: int
+    decision: str
+    avg_rating: float | None = None
+    rating_count: int = 0
+    rating_vs_venue: float | None = Field(
+        default=None,
+        description="같은 venue 평균 대비(+면 평균 이상). 원점수는 척도가 venue마다 "
+                    "달라 **stop끼리 직접 비교하면 안 된다** — 이 값으로 비교할 것")
+    is_query: bool = Field(
+        default=False, description="사용자가 조회한 그 논문인가")
+    match_method: str | None = Field(
+        default=None,
+        description="직전 stop과 이어 붙인 근거. arxiv_id | title_exact | "
+                    "title_author_fuzzy. 첫 stop은 None")
+    match_confidence: float | None = None
+
+
+class SubmissionJourney(BaseModel):
+    """같은 논문의 투고 궤적 (get_paper_story의 1부).
+
+    submission_links를 **양방향으로 전이 순회**해서 만든다 — 링크는 인접 쌍만
+    기록하므로(ICLR23→ICLR24, ICLR24→ICLR25) 한 방향만 따라가면 궤적의 절반이
+    잘린다.
+
+    ⚠️ 링크는 제목 일치로 추정한 것이라 확실한 사실이 아니다. title_author_fuzzy는
+    특히 동명 논문을 잘못 묶을 수 있어 match_confidence를 함께 노출한다.
+    """
+    stops: list[JourneyStop] = Field(
+        default_factory=list, description="연도 오름차순. 단일 투고면 1개")
+    outcome: str = Field(
+        default="single",
+        description="single(재투고 기록 없음) | improved(탈락 뒤 통과) | "
+                    "still_rejected(재투고했지만 또 탈락) | mixed(그 외)")
+    message: str | None = Field(
+        default=None, description="사용자에게 그대로 보여줄 한 줄 요약")
+
+
 class ReviewExample(BaseModel):
     """패턴을 대표하는 실제 리뷰 지적 문장 1건.
 
