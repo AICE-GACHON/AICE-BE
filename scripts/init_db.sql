@@ -169,6 +169,19 @@ CREATE TABLE submission_links (
     PRIMARY KEY (earlier_paper_id, later_paper_id)
 );
 
+-- ----------------------------------------------------------- paper_stories
+-- 심사 서사(query/story.py) 캐시. 응답 하나에 OpenReview API 2콜 + (켜져 있으면)
+-- LLM 1콜이 들어가는데, 심사가 끝난 논문은 리뷰도 수정 이력도 더 바뀌지 않는다.
+-- payload는 PaperStory를 그대로 직렬화한 것이라 모델이 바뀌면 버리고 다시 만든다.
+-- used_llm: 스텁으로 만든 캐시가 LLM 켠 요청에 나가지 않도록 컬럼으로 뺐다.
+-- ⚠️ alembic 0009와 같은 정의다. 한쪽만 고치면 신규 컨테이너와 운영 DB가 어긋난다.
+CREATE TABLE paper_stories (
+    paper_id BIGINT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+    payload  JSONB       NOT NULL,
+    used_llm BOOLEAN     NOT NULL DEFAULT false,
+    built_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ---------------------------------------------------------- ingest_status
 -- 수집 재시작을 위한 체크포인트. 43,515편을 며칠에 걸쳐 나눠 받는다.
 CREATE TABLE ingest_status (

@@ -12,7 +12,7 @@ ML/AI 논문 리서치 어시스턴트 — 백엔드(FastAPI) + AI 분석 파이
 |---|---|---|
 | `app/` | 백엔드 | FastAPI 앱 — 인증, 초안 CRUD, 분석 요청/조회, 코퍼스 조회 API |
 | `alembic/` | 백엔드 | 서비스 테이블(users/submissions/온보딩/분석 결과) 마이그레이션 |
-| `paper_assistant/` | AI | 검색·분석 파이프라인. 공개 API는 함수 6개뿐 |
+| `paper_assistant/` | AI | 검색·분석 파이프라인. 공개 API는 함수 7개뿐 |
 | `scripts/` | AI | 코퍼스 스키마(`init_db.sql`)와 운영 배치 (수집·집계·복원) |
 | `tests/` | 공통 | `tests/app`(백엔드) + `tests/paper_assistant`(AI) |
 | `docs/` | 공통 | 개발 문서 2개 (아래 "문서" 참고) |
@@ -106,7 +106,7 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-198개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
+241개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
 ### 8. 프론트엔드 함께 띄우기
@@ -153,12 +153,19 @@ GET  /api/submissions/{id}/analysis        폴링 → status=done 이면 report 
 GET  /api/papers/{paper_id}                근거로 쓰인 유사 논문 원문·리뷰 전문
 GET  /api/papers/{paper_id}/reviews        그 논문이 받은 리뷰만 (가벼운 조회)
 GET  /api/papers/{paper_id}/revisions      그 논문의 저자가 리뷰 후 무엇을 고쳤는지
+GET  /api/papers/{paper_id}/story          위 둘을 시간축으로 엮은 "심사 서사"
 ```
 
 전체 엔드포인트 목록은 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §7 또는 Swagger에 있습니다.
 
-`/revisions`만 OpenReview API를 실시간으로 조회합니다 — 느리고 실패할 수 있으니
-사용자가 '수정 이력'을 눌렀을 때만 호출하세요.
+`/revisions`와 `/story`만 OpenReview API를 실시간으로 조회합니다 — 느리고 실패할 수
+있으니 사용자가 명시적으로 눌렀을 때만 호출하세요.
+
+`/story`는 유사 논문을 눌렀을 때 **"이전엔 이랬는데 리뷰를 받고 이렇게 고쳤다"** 를
+보여주는 화면용입니다. 재투고 궤적(`journey`) + 리뷰·저자 응답·수정본을 시간순으로
+병합한 `timeline` + 요약(`narrative`)이 한 응답에 들어 있어, 상세·리뷰·수정 이력을
+따로 부를 필요가 없습니다. 결과는 `paper_stories`에 캐시되므로 두 번째 호출부터
+빠릅니다.
 
 ## 프론트가 특히 주의할 것
 
@@ -190,5 +197,11 @@ AI 파트가 실측으로 확인한 함정이라 UI에 그대로 반영해야 �
   아니라 **근거 제시**입니다.
 - **인용은 라벨의 실재성만 검증됩니다** (§23.5). 인용된 원문이 그 문장을 실제로
   뒷받침하는지는 미검증이라, 화면에서 원문을 함께 펼쳐 사용자가 대조하게 해야 합니다.
-- arXiv/S2 보강은 코드만 있고 아직 실행하지 않았습니다.
+- **arXiv/S2 보강은 코퍼스 전체를 덮지 못합니다.** 43,515편 중 `arxiv_id` 26,026편
+  (59.8%), `s2_paper_id`·`citation_count` 30,238편(69.5%)입니다. 특히 **탈락 논문은
+  38.2%**뿐인데, S2가 학회 venue로 채택 논문만 등록해서 제목 기반 보강(by-venue)이
+  거의 닿지 않기 때문입니다(채택 논문은 98.1%). 인용 엣지(`citations`)는 아직
+  적재하지 않았습니다.
+- 위에서 채운 `citation_count`·`final_venue`는 **아직 검색·분석이 읽지 않습니다.**
+  저장만 돼 있고 랭킹이나 리포트에 반영되지 않습니다.
 - 배포 설정(Dockerfile 등)은 없습니다.

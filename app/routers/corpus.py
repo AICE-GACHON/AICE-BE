@@ -1,7 +1,12 @@
-"""논문 코퍼스 조회 (OpenReview에서 수집한 기존 논문·리뷰·수정 이력).
+"""논문 코퍼스 조회 (OpenReview에서 수집한 기존 논문·리뷰·수정 이력·심사 서사).
 
 코퍼스 테이블은 AI 파트가 소유하므로 SQLAlchemy가 아니라 paper_assistant의 공개
-함수로 조회합니다. 세 엔드포인트 모두 임베딩 모델을 쓰지 않습니다.
+함수로 조회합니다. 어느 엔드포인트도 임베딩 모델(SPECTER2)을 쓰지 않습니다 —
+무거운 건 분석(POST /api/submissions/{id}/analysis) 쪽뿐입니다.
+
+다만 `/revisions`와 `/story`는 **외부 네트워크(OpenReview API)를 탑니다.** papers
+테이블에 최신 버전만 남기 때문이고, `/story`는 여기에 LLM 요약까지 붙습니다.
+둘 다 사용자가 명시적으로 눌렀을 때만 호출하세요.
 
 ⚠️ paper_id는 UUID가 아니라 BIGINT입니다. 분석 결과의
 similar_papers[].paper_id를 그대로 넘기면 됩니다.
@@ -10,9 +15,11 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from app.schemas.common import ApiResponse
 from app.schemas.corpus import (
-    PaperListResponse, PaperResponse, ReviewResponse, RevisionsResponse)
+    PaperListResponse, PaperResponse, ReviewResponse, RevisionsResponse,
+    StoryResponse)
 from paper_assistant import (
-    get_paper_detail, get_paper_reviews, get_paper_revisions, list_papers as _list_papers)
+    get_paper_detail, get_paper_reviews, get_paper_revisions, get_paper_story,
+    list_papers as _list_papers)
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
 
@@ -78,3 +85,40 @@ def get_revisions(paper_id: int):
     if revisions is None:
         raise _NOT_FOUND
     return ApiResponse[RevisionsResponse](data=revisions)
+
+
+@router.get("/{paper_id}/story", response_model=ApiResponse[StoryResponse])
+def get_story(paper_id: int, refresh: bool = Query(
+        default=False, description="캐시를 무시하고 다시 만듭니다 (느립니다)")):
+    """이 논문이 무엇을 지적받아 무엇을 고쳤는지 — 재투고 궤적 + 심사 타임라인 + 요약.
+
+    유사 논문을 눌렀을 때 "이전엔 이랬는데 리뷰를 받고 이렇게 고쳤다"를 보여주는
+    화면용입니다. `/{paper_id}`(원문·리뷰)와 `/{paper_id}/revisions`(수정 diff)를
+    시간축으로 엮은 것이라, 이 엔드포인트를 쓰면 둘을 따로 부를 필요가 없습니다.
+
+    응답은 세 부분이고 **서로 독립적으로 비어 있을 수 있습니다.**
+
+    - `journey` — 재투고 궤적. DB만 쓰므로 항상 채워집니다. 재투고 기록이 없으면
+      자기 자신 1개짜리(outcome='single')입니다.
+    - `timeline` — 리뷰·저자 응답·수정본을 시간순으로 병합한 목록.
+    - `narrative` — 요약. `used_llm=false`면 LLM이 꺼져 있어 결정론적 스텁입니다.
+
+    ⚠️ **`timeline_supported=false`는 '심사가 없었다'가 아니라 '공개되지 않는다'는
+    뜻입니다.** 빈 목록으로 처리하지 말고 `caveats`의 문구를 그대로 노출하세요.
+
+    ⚠️ `timeline`의 리뷰 본문·점수는 **최종 수정본**입니다. 리뷰어가 저자 응답 이후
+    리뷰를 고쳤으면 최초 게시 시점(`at`)의 내용과 다릅니다. 수정 전 점수는
+    OpenReview가 공개하지 않으므로 **'몇 점에서 몇 점으로 올랐다'는 표시를 만들지
+    마세요** — 수정이 있었다는 사실은 `review_update` 이벤트로 옵니다.
+
+    ⚠️ 저자 수정으로 확인할 수 있는 범위는 제목·초록·첨부파일까지입니다. 본문 PDF
+    내용은 알 수 없으니 "실험을 추가했다" 같은 표현을 화면에서 만들지 마세요.
+
+    첫 호출은 OpenReview를 2번 타고(LLM을 켜면 Sonnet까지) 수 초가 걸립니다.
+    결과를 캐시하므로 두 번째부터는 빠릅니다. 논문 상세와 함께 미리 부르지 말고
+    사용자가 명시적으로 열었을 때 호출하세요.
+    """
+    story = get_paper_story(paper_id, refresh=refresh)
+    if story is None:
+        raise _NOT_FOUND
+    return ApiResponse[StoryResponse](data=story)
