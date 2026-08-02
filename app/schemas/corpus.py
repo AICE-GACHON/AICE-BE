@@ -15,14 +15,17 @@
 붙이지 말고 '리뷰 본문' 한 덩어리로 표시해야 합니다.
 """
 from paper_assistant.schemas import (
-    DiffSegment, FieldChange, PaperDetail, PaperListResponse, PaperRevisions,
-    PaperSummary, ReviewDetail, ReviewPointDetail, RevisionEntry)
+    DiffSegment, FieldChange, JourneyStop, PaperDetail, PaperListResponse,
+    PaperRevisions, PaperStory, PaperSummary, ReviewDetail, ReviewPointDetail,
+    RevisionEntry, StoryNarrative, SubmissionJourney, TimelineEvent)
 
 # 백엔드 응답 이름으로 쓰는 별칭
 PaperResponse = PaperDetail
 ReviewResponse = ReviewDetail
 # 수정 이력은 DB에 저장하지 않고 OpenReview API를 실시간 조회합니다.
 RevisionsResponse = PaperRevisions
+# 심사 서사도 같은 이유로 실시간 조회이지만, 결과를 paper_stories에 캐시합니다.
+StoryResponse = PaperStory
 
 __all__ = [
     "PaperResponse",
@@ -30,6 +33,7 @@ __all__ = [
     "PaperSummary",
     "ReviewResponse",
     "RevisionsResponse",
+    "StoryResponse",
     "PaperDetail",
     "ReviewDetail",
     "ReviewPointDetail",
@@ -37,4 +41,9 @@ __all__ = [
     "RevisionEntry",
     "FieldChange",
     "DiffSegment",
+    "PaperStory",
+    "SubmissionJourney",
+    "JourneyStop",
+    "TimelineEvent",
+    "StoryNarrative",
 ]

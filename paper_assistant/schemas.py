@@ -180,6 +180,145 @@ class PaperRevisions(BaseModel):
     revisions: list[RevisionEntry] = Field(default_factory=list)
 
 
+class JourneyStop(BaseModel):
+    """재투고 궤적의 한 지점 — 같은 논문이 어느 학회에 내서 어떻게 됐는지."""
+    paper_id: int
+    openreview_id: str
+    title: str
+    venue: str
+    year: int
+    decision: str
+    avg_rating: float | None = None
+    rating_count: int = 0
+    rating_vs_venue: float | None = Field(
+        default=None,
+        description="같은 venue 평균 대비(+면 평균 이상). 원점수는 척도가 venue마다 "
+                    "달라 **stop끼리 직접 비교하면 안 된다** — 이 값으로 비교할 것")
+    is_query: bool = Field(
+        default=False, description="사용자가 조회한 그 논문인가")
+    match_method: str | None = Field(
+        default=None,
+        description="직전 stop과 이어 붙인 근거. arxiv_id | title_exact | "
+                    "title_author_fuzzy. 첫 stop은 None")
+    match_confidence: float | None = None
+
+
+class SubmissionJourney(BaseModel):
+    """같은 논문의 투고 궤적 (get_paper_story의 1부).
+
+    submission_links를 **양방향으로 전이 순회**해서 만든다 — 링크는 인접 쌍만
+    기록하므로(ICLR23→ICLR24, ICLR24→ICLR25) 한 방향만 따라가면 궤적의 절반이
+    잘린다.
+
+    ⚠️ 링크는 제목 일치로 추정한 것이라 확실한 사실이 아니다. title_author_fuzzy는
+    특히 동명 논문을 잘못 묶을 수 있어 match_confidence를 함께 노출한다.
+    """
+    stops: list[JourneyStop] = Field(
+        default_factory=list, description="연도 오름차순. 단일 투고면 1개")
+    outcome: str = Field(
+        default="single",
+        description="single(재투고 기록 없음) | improved(탈락 뒤 통과) | "
+                    "still_rejected(재투고했지만 또 탈락) | mixed(그 외)")
+    message: str | None = Field(
+        default=None, description="사용자에게 그대로 보여줄 한 줄 요약")
+
+
+class TimelineEvent(BaseModel):
+    """심사 과정의 사건 1건. 리뷰·저자 응답·수정본을 한 시간축에 올린 단위.
+
+    kind별로 채워지는 필드가 다르다:
+      review          → review (점수·본문)
+      review_update   → rating (최종 점수). 아래 경고 참고
+      rebuttal        → text (저자가 쓴 응답 원문)
+      comment         → text (리뷰어·AC가 쓴 후속 코멘트)
+      author_revision → changes (기존 FieldChange 그대로), is_baseline
+      meta_review     → text
+      decision        → text
+
+    ⚠️ **review 이벤트의 본문·점수는 '최종 수정본'이다.** 리뷰어가 저자 응답을
+    보고 리뷰를 고쳤어도 우리가 가진 건 고쳐진 뒤의 내용뿐이라, 그것을 최초 게시
+    시각(at)에 붙여 보여주게 된다. 수정 전 내용은 복원할 방법이 없다 — OpenReview
+    edit 이력에서 리뷰의 첫 edit은 content가 빈 채로 내려온다(실측 3건 전부).
+    그래서 수정이 있었던 리뷰는 review_update 이벤트를 따로 세워 "이 시점에
+    고쳐졌고, 고치기 전 점수는 공개되지 않는다"를 명시한다.
+    """
+    event_id: str
+    at: int = Field(description="epoch ms. 정렬 키")
+    date: str = Field(description="YYYY-MM-DD HH:MM (KST)")
+    kind: str = Field(
+        description="review | review_update | rebuttal | comment | "
+                    "author_revision | meta_review | decision")
+    kind_label: str = Field(description="화면 표시용 한국어 라벨")
+    actor: str = Field(description="'리뷰어 AHeX' | '저자' | 'AC' 등 표시용")
+    headline: str = Field(description="한 줄 요약. 접힌 상태에서 보여줄 문장")
+
+    review: ReviewDetail | None = None
+    rating: float | None = Field(
+        default=None,
+        description="review_update일 때 **최종** 점수. 수정 전 점수는 구할 수 없어 "
+                    "'몇 점에서 몇 점으로 올랐다'는 표현을 만들면 안 된다")
+    text: str | None = Field(
+        default=None, description="rebuttal·meta_review·decision 원문")
+    changes: list[FieldChange] = Field(default_factory=list)
+    is_baseline: bool = Field(
+        default=False, description="author_revision 중 관측 가능한 첫 버전")
+
+
+class StoryNarrative(BaseModel):
+    """'무엇을 지적받아 무엇을 고쳤는가' 요약 (get_paper_story의 3부).
+
+    ⚠️ **근거의 한계가 구조적이다.** 우리가 볼 수 있는 수정은 제목·초록·첨부파일
+    교체 여부뿐이고, 실제 논문 본문이 어떻게 바뀌었는지는 PDF 안에 있어 알 수
+    없다. 그래서 여기 문장은 "리뷰어가 X를 지적했고 저자가 Y라고 답했으며,
+    초록에는 Z가 반영됐다"까지만 말한다 — 본문 반영 여부는 단정하지 않는다.
+    evidence_scope가 그 한계를 명시하므로 프론트는 이 값을 함께 노출할 것.
+    """
+    headline: str = Field(description="한 문장 요약")
+    reviewers_asked: list[str] = Field(
+        default_factory=list, description="리뷰어가 요구한 것")
+    authors_changed: list[str] = Field(
+        default_factory=list, description="저자가 응답하거나 실제로 고친 것")
+    outcome_note: str = Field(
+        default="", description="그래서 결과가 어떻게 됐는지")
+    evidence_scope: str = Field(
+        description="abstract_only(제목·초록 diff만 확인) | replies_only(수정 이력 "
+                    "비공개 venue라 리뷰·응답만 확인) — 근거의 한계를 그대로 노출할 것")
+    used_llm: bool = Field(
+        default=False,
+        description="실제 LLM 호출로 만들어졌는지. False면 결정론적 스텁이다 "
+                    "(Report.used_llm과 같은 규약 — 설정값이 아니라 실행 결과)")
+
+
+class PaperStory(BaseModel):
+    """논문 1편의 심사 서사 (get_paper_story 반환).
+
+    "이 논문은 처음엔 이랬는데, 이런 지적을 받고, 이렇게 고쳤다"를 한 응답으로
+    답한다. 세 부분이 서로 독립적으로 실패할 수 있게 설계돼 있다 — journey는 DB만
+    쓰므로 항상 채워지고, timeline은 외부 API가 죽으면 비고, narrative는 LLM이
+    꺼져 있으면 스텁이다. 한 부분이 비어도 나머지는 보여줄 것.
+    """
+    paper_id: int
+    openreview_id: str
+    title: str
+    venue: str
+    year: int
+    decision: str
+
+    journey: SubmissionJourney = Field(default_factory=lambda: SubmissionJourney())
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    timeline_supported: bool = Field(
+        default=False,
+        description="이 venue에서 심사 타임라인을 볼 수 있는가. False는 '심사가 "
+                    "없었다'가 아니라 **공개되지 않는다**는 뜻이다")
+    narrative: StoryNarrative | None = None
+    caveats: list[str] = Field(
+        default_factory=list,
+        description="이 응답으로 알 수 없는 것. 사용자에게 그대로 노출 가능한 문장")
+    cached_at: str | None = Field(
+        default=None,
+        description="캐시에서 나온 응답이면 최초 생성 시각(ISO). 방금 만든 것이면 None")
+
+
 class ReviewExample(BaseModel):
     """패턴을 대표하는 실제 리뷰 지적 문장 1건.
 

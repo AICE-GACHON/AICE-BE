@@ -4,12 +4,13 @@
 
     from paper_assistant import (
         analyze, get_paper_detail, get_paper_reviews, get_paper_revisions,
-        list_papers, extract_pdf_title_abstract)
+        get_paper_story, list_papers, extract_pdf_title_abstract)
 
     report  = analyze(title, abstract)      # -> Report (무겁다: 임베딩+검색+집계)
     detail  = get_paper_detail(paper_id)    # -> PaperDetail | None  (DB 조회만)
     reviews = get_paper_reviews(paper_id)   # -> list[ReviewDetail] | None
     revs    = get_paper_revisions(paper_id) # -> PaperRevisions | None (외부 API)
+    story   = get_paper_story(paper_id)     # -> PaperStory | None (외부 API + LLM)
     listing = list_papers(...)              # -> PaperListResponse (DB 조회만)
     title, abstract = extract_pdf_title_abstract(pdf_bytes)  # PDF -> (title, abstract)
 
@@ -20,13 +21,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:   # 런타임에는 임포트하지 않는다 (torch 로드 회피)
     from paper_assistant.schemas import (
-        PaperDetail, PaperListResponse, PaperRevisions, Report, ReviewDetail)
+        PaperDetail, PaperListResponse, PaperRevisions, PaperStory, Report,
+        ReviewDetail)
 
 __all__ = [
     "analyze",
     "get_paper_detail",
     "get_paper_reviews",
     "get_paper_revisions",
+    "get_paper_story",
     "list_papers",
     "extract_pdf_title_abstract",
 ]
@@ -85,3 +88,18 @@ def get_paper_revisions(paper_id: int) -> "PaperRevisions | None":
     """
     from paper_assistant.query.revisions import get_paper_revisions as _fn
     return _fn(paper_id)
+
+
+def get_paper_story(paper_id: int, use_llm: bool | None = None,
+                    refresh: bool = False) -> "PaperStory | None":
+    """이 논문이 무엇을 지적받아 무엇을 고쳤는지 (재투고 궤적 + 심사 타임라인 + 요약).
+
+    get_paper_detail(원문·리뷰)과 get_paper_revisions(수정 diff)를 시간축으로 엮은
+    것이다. 둘을 각각 호출해 프론트에서 합칠 필요가 없다.
+
+    가장 무거운 조회다 — OpenReview를 2번 타고 use_llm이면 Sonnet까지 부른다.
+    대신 결과를 paper_stories에 캐시하므로 두 번째 호출부터는 DB 조회 1번이다.
+    use_llm=None이면 설정값(PAPER_ASSISTANT_USE_LLM)을 따른다.
+    """
+    from paper_assistant.query.story import get_paper_story as _fn
+    return _fn(paper_id, use_llm=use_llm, refresh=refresh)

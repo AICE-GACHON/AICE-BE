@@ -57,10 +57,10 @@ AICE/
 │   │   └── corpus.py             # AI 파트 스키마 재수출 (중복 정의 금지)
 │   └── services/
 │       └── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
-├── paper_assistant/          # AI 파트 (공개 API 6개)
+├── paper_assistant/          # AI 파트 (공개 API 7개)
 │   ├── config.py               # ★ 공유 환경설정의 단일 소스
 │   ├── schemas.py              # Report 등 통합 계약 스키마
-│   ├── query/                  # 조회 전용 (detail, revisions)
+│   ├── query/                  # 조회 전용 (detail, revisions, journey/timeline/narrative/story)
 │   ├── graph/                  # LangGraph 고정 DAG (분석 노드들)
 │   ├── retrieval/              # 하이브리드 검색 (벡터 + 전문검색 RRF)
 │   ├── embedding/              # SPECTER2
@@ -202,6 +202,7 @@ vs 안 받은 논문의 당락 차이(`is_contrast_significant`) 기준으로 �
 | Corpus | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Corpus | `GET /api/papers/{paper_id}/reviews` | 그 논문의 리뷰 목록 | - |
 | Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
+| Corpus | `GET /api/papers/{paper_id}/story` | 심사 서사 — 재투고 궤적 + 리뷰·응답·수정 타임라인 + 요약 (**외부 API 실시간 조회 + LLM**, `paper_stories`에 캐시) | - |
 | Onboarding | `POST /api/onboarding` | 회원가입 전 익명 온보딩 답변 저장 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
@@ -229,17 +230,19 @@ rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signu
 ## 8. AI팀 연동 방식
 
 AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은
-함수 여섯 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
+함수 일곱 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
 
 ```python
 from paper_assistant import (
     analyze, get_paper_detail, get_paper_reviews, get_paper_revisions,
-    list_papers, extract_pdf_title_abstract)
+    get_paper_story, list_papers, extract_pdf_title_abstract)
 
 report   = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report
 detail   = get_paper_detail(paper_id)        # -> PaperDetail | None    (DB만)
 reviews  = get_paper_reviews(paper_id)       # -> list[ReviewDetail] | None
 revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API)
+story    = get_paper_story(paper_id, use_llm=None, refresh=False)
+                                             # -> PaperStory | None (외부 API + LLM)
 listing  = list_papers(venue=..., year=..., field=..., q=..., limit=, offset=)
 title, abstract = extract_pdf_title_abstract(pdf_bytes)   # PDF 업로드 경로용
 ```
@@ -252,6 +255,29 @@ import입니다 — `import paper_assistant` 자체는 가볍습니다.
   느리고 실패할 수 있으므로 사용자가 명시적으로 요청했을 때만 호출합니다.
   `supported=false`는 "수정이 없었다"가 아니라 "볼 수 없다"는 뜻이며(2023년 이전 학회는
   저자 수정 이력을 공개하지 않음), 이때 `message`를 그대로 사용자에게 보여주면 됩니다.
+
+- `get_paper_story()`는 위 조회들을 **시간축으로 엮은** 것입니다. 세 부분(`journey` /
+  `timeline` / `narrative`)이 서로 **독립적으로 실패**하도록 만들었습니다 — 외부 API가
+  죽어도 `journey`(DB만 조회)는 나가고, LLM이 꺼져 있어도 `timeline`은 나갑니다. 한
+  부분이 비었다고 전체를 실패로 처리하지 마세요.
+
+  실측으로 확인한 한계 세 가지가 있고, 전부 `caveats`에 사용자용 문구로 들어갑니다:
+
+  1. **리뷰 본문·점수는 최종 수정본입니다.** 리뷰어가 저자 응답 이후 리뷰를 고쳤어도
+     우리가 가진 건 고쳐진 뒤의 내용뿐인데, 그걸 최초 게시 시각에 붙여 보여주게 됩니다.
+     수정 전 점수는 복원할 수 없습니다 — 리뷰 노트의 edit 이력에서 첫 edit은 content가
+     빈 채로 내려옵니다(표본 3건 전부). 그래서 **"6점 → 7점" 같은 표시를 만들면 안
+     되고**, 수정이 있었다는 사실만 `review_update` 이벤트로 옵니다.
+  2. **저자 수정으로 볼 수 있는 건 제목·초록·첨부파일까지입니다.** 본문은 PDF 안이라
+     읽을 수 없으므로 "실험을 추가했다"는 화면에서 단정하면 안 됩니다. LLM 프롬프트에도
+     같은 제약을 걸어 뒀습니다("~하겠다고 답변함"까지만 쓰게).
+  3. **v2 학회인데도 수정 이력이 안 열리는 경우가 흔합니다** (무작위 14편 중 저자
+     수정본이 보인 건 3편, ICLR 2024·NeurIPS는 대개 게재 확정본만). 이걸 "수정 없음"
+     으로 그리지 마세요.
+
+  반대로 **2023년 이전 학회도 리뷰·저자 응답 타임라인은 나옵니다** (ICLR 2022 실측:
+  리뷰 4건 + 저자 응답 8건). `/revisions`가 `supported=false`로 아무것도 주지 못하던
+  구간이라, 구 학회 논문은 `/story` 쪽이 훨씬 많은 것을 보여줍니다.
 
 - `analyze()`는 **stateless**입니다 — DB에 아무것도 쓰지 않고 `Report`만 돌려줍니다.
   결과를 사용자·submission에 묶어 저장하는 건 `app/services/analysis.py`의 몫입니다.
