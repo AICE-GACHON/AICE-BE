@@ -32,9 +32,14 @@ log = logging.getLogger(__name__)
 
 RRF_K = 60
 
-# 재정렬은 이미 검색된 것만 재배치할 수 있다. 풀이 좁으면 최신성 가중치가 끌어올릴
-# 후보 자체가 없어서 효과가 안 난다. 그래서 재정렬 도입과 함께 50 → 150으로 넓혔다.
-CANDIDATE_POOL = 150   # 각 검색기에서 가져올 후보 수
+# 재정렬 도입 때 "풀이 좁으면 최신성이 끌어올릴 후보가 없다"는 이유로 150까지
+# 넓혔다가 **50으로 되돌렸다.** 풀을 3배로 키우면 HNSW ef_search 가 600까지 올라가
+# 검색 비용이 그만큼 붙는데, **그 값어치를 하는지 측정하지 않았기 때문이다.**
+# 근거 없는 비용은 지불하지 않는다는 판단(2026-08-05).
+#
+# ⚠️ docs/랭킹_가중치_설계.md §11 의 검증 수치는 풀 150에서 측정한 것이다.
+# 50 기준 재측정은 아직 하지 않았다. 50 vs 150 비교는 후속 과제로 남아 있다.
+CANDIDATE_POOL = 50   # 각 검색기에서 가져올 후보 수
 
 # HNSW는 ef_search(기본 40)보다 많은 행을 반환하지 못한다. CANDIDATE_POOL이 50이라
 # 기본값 그대로면 벡터 후보가 40개로 잘려 RRF 결합이 한쪽만 얕아진다 (§20 실측).
@@ -280,15 +285,22 @@ def _fetch_metadata(cur, paper_ids: list[int]) -> dict[int, tuple]:
 
 
 def hybrid_search(embedding, query_text: str, top_k: int = 20,
-                  pool: int = CANDIDATE_POOL) -> list[SearchResult]:
+                  pool: int | None = None) -> list[SearchResult]:
     """벡터·full-text를 RRF로 결합하고 가중합으로 재정렬해 상위 top_k편 반환.
 
     embedding: SPECTER2로 인코딩한 쿼리 벡터 (L2 정규화된 numpy/list)
     query_text: full-text 검색에 쓸 원문 (보통 제목 + 초록)
+    pool: 각 검색기에서 가져올 후보 수. None이면 CANDIDATE_POOL.
 
     반환 순서는 **final_score 기준**이다. rrf_score도 같이 실어 보내지만 그건
     유사도 성분일 뿐이라 정렬 기준이 아니다.
+
+    pool 기본값을 `= CANDIDATE_POOL`로 쓰지 않는 이유는 recency_score와 같다 —
+    파이썬 기본 인자는 정의 시점에 한 번 평가되므로, 튜닝 실험이 모듈 상수를
+    바꿔도 반영되지 않아 조용히 옛 값으로 검색하게 된다.
     """
+    if pool is None:
+        pool = CANDIDATE_POOL
     with cursor() as cur:
         vector_hits = _vector_search(cur, embedding, pool)
         fts_hits = _fulltext_search(cur, query_text, pool)
