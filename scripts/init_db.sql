@@ -14,6 +14,11 @@ CREATE TABLE papers (
     arxiv_id      TEXT,           -- arxiv_matcher가 로컬 arXiv 캐시로 채운다
     s2_paper_id   TEXT,           -- s2_enricher가 채운다
     citation_count INT,           -- S2 citationCount (보강 시점 스냅샷)
+    -- 같은 연도 안에서의 인용 백분위 [0,1]. 랭킹 가중치가 절대 인용수 대신 이걸
+    -- 쓴다 — 오래된 논문일수록 인용을 쌓을 시간이 많아 공정하지 않기 때문이다.
+    -- citation_count 가 NULL 이면 여기도 NULL (검색 시 중립값 0.5로 대체).
+    -- 갱신은 scripts/refresh_citation_percentile.sql. 근거는 alembic 0010 참고.
+    citation_percentile REAL,
 
     title         TEXT NOT NULL,
     abstract      TEXT,
