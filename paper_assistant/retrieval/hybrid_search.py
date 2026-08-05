@@ -33,17 +33,30 @@ log = logging.getLogger(__name__)
 RRF_K = 60
 
 # 재정렬 도입 때 "풀이 좁으면 최신성이 끌어올릴 후보가 없다"는 이유로 150까지
-# 넓혔다가 **50으로 되돌렸다.** 풀을 3배로 키우면 HNSW ef_search 가 600까지 올라가
-# 검색 비용이 그만큼 붙는데, **그 값어치를 하는지 측정하지 않았기 때문이다.**
-# 근거 없는 비용은 지불하지 않는다는 판단(2026-08-05).
+# 넓혔다가 **50으로 되돌렸다.** 실측 결과(docs/랭킹_가중치_설계.md §11.6):
 #
-# ⚠️ docs/랭킹_가중치_설계.md §11 의 검증 수치는 풀 150에서 측정한 것이다.
-# 50 기준 재측정은 아직 하지 않았다. 50 vs 150 비교는 후속 과제로 남아 있다.
+#   풀 150 : 0.488 → 0.503  (+3.1%)
+#   풀  50 : 0.490 → 0.489  (변화 없음)
+#
+# 정확도 이득이 넓은 풀에 딸려 있던 것은 맞다 — 재정렬은 이미 검색된 후보만
+# 재배치하므로 풀이 좁으면 끌어올릴 최신 논문 자체가 적다. 다만 그 차이 0.014는
+# 표본 150편 기준 노이즈 범위 안이라, 검색 비용 3배(ef_search 200 → 600)를 지불할
+# 근거로는 약하다고 판단했다. **요구사항 자체는 풀 50에서도 그대로 달성된다**
+# (2025년 비중 43.5% → 87.9%).
 CANDIDATE_POOL = 50   # 각 검색기에서 가져올 후보 수
 
 # HNSW는 ef_search(기본 40)보다 많은 행을 반환하지 못한다. CANDIDATE_POOL이 50이라
 # 기본값 그대로면 벡터 후보가 40개로 잘려 RRF 결합이 한쪽만 얕아진다 (§20 실측).
+#
+# 이 값은 **기본 풀에 대한 참고값**이다. 실제 ef_search는 _vector_search 가 그때의
+# limit 으로 다시 계산한다 — 여기 상수를 쓰면 hybrid_search(pool=...) 로 풀을 키웠을
+# 때 ef_search 가 따라오지 않아 조용히 후보가 잘린다.
 HNSW_EF_SEARCH = max(CANDIDATE_POOL * 4, 100)
+
+
+def _ef_search_for(limit: int) -> int:
+    """주어진 후보 수를 채우는 데 필요한 ef_search. limit 과 항상 함께 움직인다."""
+    return max(limit * 4, 100)
 
 # ------------------------------------------------------------ 랭킹 가중치
 # 합이 1.0이라 각 값이 곧 지분 비율이다. 최신성 > 유사도가 요구사항의 핵심.
@@ -97,7 +110,9 @@ class SearchResult:
     final_score: float = 0.0
     """가중합 재정렬 점수. **결과 정렬은 이 값 기준이다** (rrf_score가 아니라)."""
     recency: float = 0.0
-    """최신성 [0,1]. 2025년=1.00, 2020년=0.18. match_type과 같은 결의 $0 근거다."""
+    """최신성 [0,1]. 반감기 3년 기준 2025년=1.00, 2020년=0.32.
+
+    match_type과 같은 결의 $0 근거다 — 왜 이 순위인지 눈으로 확인할 수 있다."""
     citation_percentile: float = NEUTRAL_CITATION_PERCENTILE
     """같은 연도 내 인용 백분위 [0,1]. 결측이면 중립값 0.5."""
 
@@ -105,10 +120,12 @@ class SearchResult:
 def _vector_search(cur, embedding, limit: int) -> list[tuple[int, float]]:
     """(paper_id, 코사인 유사도) 순위순. 벡터는 L2 정규화 상태로 저장돼 있다."""
     # ef_search < limit이면 요청한 개수를 못 채운다 (기본 40 < pool 50).
+    # **모듈 상수가 아니라 이번 limit 으로 계산한다** — 상수를 쓰면 호출자가
+    # pool 을 키웠을 때 ef_search 가 그대로 남아 후보가 조용히 잘린다.
     # SET은 바인드 파라미터를 못 받으므로 set_config를 쓴다. 세 번째 인자 true =
     # 트랜잭션 로컬이라 풀에 반납된 커넥션에 설정이 남지 않는다.
     cur.execute("SELECT set_config('hnsw.ef_search', %s, true)",
-                (str(HNSW_EF_SEARCH),))
+                (str(_ef_search_for(limit)),))
     cur.execute(
         """
         SELECT id, 1 - (embedding <=> %s) AS cosine

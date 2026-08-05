@@ -3,8 +3,9 @@ import pytest
 
 from paper_assistant.retrieval.hybrid_search import (
     CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE,
-    RECENCY_HALF_LIFE, RRF_K, W_CITATION, W_RECENCY, W_SIMILARITY, match_type,
-    max_rrf, recency_score, rerank, rrf_fuse, weighted_score)
+    RECENCY_HALF_LIFE, RRF_K, W_CITATION, W_RECENCY, W_SIMILARITY,
+    _ef_search_for, match_type, max_rrf, recency_score, rerank, rrf_fuse,
+    weighted_score)
 
 
 def test_match_type_reflects_which_retrievers_hit():
@@ -25,6 +26,17 @@ def test_ef_search_covers_candidate_pool():
     기본값 40 < CANDIDATE_POOL 50이라 벡터 후보가 잘리던 버그가 있었다 (§20).
     """
     assert HNSW_EF_SEARCH >= CANDIDATE_POOL
+
+
+@pytest.mark.parametrize("limit", [10, 50, 150, 300])
+def test_ef_search_follows_the_requested_limit(limit):
+    """ef_search가 **그때의 limit**을 따라야 한다 — 모듈 상수에 고정되면 안 된다.
+
+    hybrid_search(pool=...)로 풀을 키웠는데 ef_search가 기본 풀 기준에 머물면,
+    HNSW가 요청한 개수를 못 채워 벡터 후보만 조용히 잘린다. 에러가 안 나서
+    알아채기 어려운 종류의 버그다.
+    """
+    assert _ef_search_for(limit) >= limit
 
 
 def test_both_retrievers_agreeing_beats_either_alone():
