@@ -16,6 +16,11 @@ UPDATE papers
 SET citation_percentile = NULL
 WHERE citation_count IS NULL AND citation_percentile IS NOT NULL;
 
+-- ⚠️ 비교할 때 s.pct 를 REAL 로 캐스팅해야 한다. citation_percentile 은 REAL(float4)
+-- 인데 cume_dist() 는 double precision 을 낸다. 캐스팅 없이 IS DISTINCT FROM 을 쓰면
+-- REAL 이 double 로 승격되면서 저장 시 잃은 반올림 오차(~3e-08) 때문에 **항상 "다르다"**
+-- 로 판정되어, 값이 이미 맞는데도 매번 3만 행을 통째로 다시 쓴다 (실측으로 확인).
+-- 결과는 같지만 WAL 과 테이블 부풀림이 공짜로 쌓인다.
 UPDATE papers p
 SET citation_percentile = s.pct
 FROM (
@@ -25,6 +30,6 @@ FROM (
     WHERE citation_count IS NOT NULL
 ) s
 WHERE p.id = s.id
-  AND (p.citation_percentile IS DISTINCT FROM s.pct);
+  AND (p.citation_percentile IS DISTINCT FROM s.pct::real);
 
 COMMIT;
