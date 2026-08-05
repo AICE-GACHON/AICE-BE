@@ -1,11 +1,13 @@
 """RRF 결합·가중합 재정렬 로직 테스트 (DB 불필요)."""
+import inspect
+
 import pytest
 
+from paper_assistant.retrieval import hybrid_search
 from paper_assistant.retrieval.hybrid_search import (
-    CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE,
-    RECENCY_HALF_LIFE, RRF_K, W_CITATION, W_RECENCY, W_SIMILARITY,
-    _ef_search_for, match_type, max_rrf, recency_score, rerank, rrf_fuse,
-    weighted_score)
+    CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE, RRF_K,
+    W_CITATION, W_RECENCY, W_SIMILARITY, _ef_search_for, match_type, max_rrf,
+    recency_score, rerank, rrf_fuse, weighted_score)
 
 
 def test_match_type_reflects_which_retrievers_hit():
@@ -99,10 +101,29 @@ def test_recency_decays_by_half_life():
     assert recency_score(2021, 2025, half_life=2) == pytest.approx(0.25)
 
 
-def test_half_life_defaults_to_the_tuned_constant():
-    """기본 인자로 박아두면 상수를 바꿔도 반영되지 않는다 — 그 함정을 막는다."""
-    assert recency_score(2024, 2025) == pytest.approx(
-        recency_score(2024, 2025, half_life=RECENCY_HALF_LIFE))
+def test_half_life_is_read_at_call_time_not_bound_at_definition(monkeypatch):
+    """상수를 바꾸면 함수가 따라와야 한다 — 기본 인자에 박히는 함정을 막는다.
+
+    `def recency_score(..., half_life=RECENCY_HALF_LIFE)` 로 쓰면 파이썬이 정의
+    시점에 값을 한 번 평가해 박아버린다. 그러면 튜닝 실험이 모듈 상수를 바꿔도
+    반영되지 않아 **조용히 옛 값으로 계산된다** (실제로 겪은 문제다).
+
+    상수를 실제로 바꿔서 검증해야 한다. 상수를 안 바꾸고 두 호출을 비교하면
+    버그가 있는 버전에서도 값이 같아 그냥 통과한다 — 못 막는 테스트가 된다.
+    """
+    monkeypatch.setattr(hybrid_search, "RECENCY_HALF_LIFE", 6.0)
+    # 반감기 6년이면 6년 묵은 논문이 정확히 절반이 된다.
+    assert hybrid_search.recency_score(2019, 2025) == pytest.approx(0.5)
+
+
+def test_candidate_pool_is_read_at_call_time_too():
+    """hybrid_search 의 pool 도 같은 함정을 피해야 한다.
+
+    DB 없이 확인할 수 있는 지점은 기본값이 None 인지다. `= CANDIDATE_POOL` 로
+    되돌리는 순간 상수 변경이 반영되지 않는다.
+    """
+    default = inspect.signature(hybrid_search.hybrid_search).parameters["pool"].default
+    assert default is None
 
 
 def test_recency_is_monotonic_in_year():
