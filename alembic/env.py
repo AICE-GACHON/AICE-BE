@@ -17,6 +17,10 @@ import app.models  # noqa: E402,F401  # 모든 모델을 등록하기 위해 imp
 # AI 파트가 scripts/init_db.sql로 관리하는 논문 코퍼스 테이블.
 # 같은 DB에 있지만 app/models에는 없으므로, 이 목록을 걸러주지 않으면
 # autogenerate가 "모델에 없는 테이블"로 보고 전부 DROP하는 마이그레이션을 만든다.
+#
+# ⚠️ **코퍼스 테이블을 새로 만들면 여기에도 반드시 추가할 것.** 빠뜨려도 아무 일이
+# 일어나지 않다가, 다음에 누군가 autogenerate를 돌리는 순간 그 테이블을 DROP하는
+# 마이그레이션이 조용히 만들어진다. `alembic check`가 이 상태를 잡아준다.
 CORPUS_TABLES = {
     "papers",
     "authors",
@@ -28,6 +32,9 @@ CORPUS_TABLES = {
     "citations",
     "submission_links",
     "ingest_status",
+    # 심사 서사 캐시. alembic 0009가 만들지만 소유자는 AI 파트이고 SQLAlchemy 모델이
+    # 없다 — 백엔드는 이 테이블을 직접 읽지 않고 paper_assistant를 거친다.
+    "paper_stories",
 }
 
 

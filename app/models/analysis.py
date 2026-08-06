@@ -14,6 +14,10 @@ from app.database import Base
 # (alembic 0002) — 여기만 바꾸면 중복 방지가 조용히 풀린다.
 IN_PROGRESS = ("pending", "running")
 
+# 위 상수에서 인덱스의 WHERE 절을 만든다. 문자열을 따로 적으면 IN_PROGRESS를 고쳤을
+# 때 한쪽만 바뀌는데, 그게 정확히 이 주석이 경고하는 상황이다.
+_IN_PROGRESS_SQL = ", ".join(f"'{s}'" for s in IN_PROGRESS)
+
 
 class ReviewPrediction(Base):
     """분석 1회분(review_predictions). 백그라운드 작업의 상태이자 결과 저장소입니다.
@@ -34,6 +38,13 @@ class ReviewPrediction(Base):
     __tablename__ = "review_predictions"
     __table_args__ = (
         Index("review_predictions_submission", "submission_id", "created_at"),
+        # ⚠️ 위 docstring이 말하는 그 부분 유니크 인덱스다. **실제로 만드는 것은
+        # alembic 0002이고, 여기 선언은 "모델이 DB를 설명하게" 하기 위한 것이다.**
+        # 이 선언이 없으면 autogenerate가 "모델에 없는 인덱스"로 보고 DROP을 제안하고,
+        # 그 마이그레이션을 무심코 적용하면 중복 분석 방지가 조용히 풀린다.
+        # (app/models/submission.py에도 같은 취지의 경고가 있다.)
+        Index("review_predictions_one_active", "submission_id", unique=True,
+              postgresql_where=text(f"status IN ({_IN_PROGRESS_SQL})")),
     )
 
     prediction_id: Mapped[uuid.UUID] = mapped_column(
