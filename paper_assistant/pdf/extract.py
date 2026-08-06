@@ -1,8 +1,20 @@
 """PDF draft → 제목/초록 추출.
 
-**제목은 폰트 크기로 뽑는다.** 논문 첫 페이지에서 제목은 항상 본문·저자보다 큰
-폰트를 쓴다(실측: 제목 14.3~17.2pt vs 저자 10pt). 텍스트 순서만 보면 제목 뒤에
-바로 붙는 저자 줄을 걸러낼 수 없어서, PyMuPDF의 span 폰트 크기를 신호로 쓴다.
+**제목은 폰트 크기로 뽑고, 이어붙이는 것은 좌표로 한다.**
+
+어느 span이 제목인지는 폰트 크기가 알려준다 — 논문 첫 페이지에서 제목은 항상
+본문·저자보다 크다(실측: 제목 14.3~17.2pt vs 저자 10pt). 텍스트 순서만 보면 제목 뒤에
+바로 붙는 저자 줄을 걸러낼 수 없다.
+
+그 span들을 어떻게 이을지는 **bbox가 알려준다** (_join_spans). 예전에는 전부 공백으로
+잇고 정규식으로 복구했는데, 드롭캡 조판이 한 단어를 셋으로 쪼개거나 줄 끝 하이픈이
+자기 span으로 떨어지는 경우를 복구하지 못했다 — 실측 실패:
+`L ORA: LOW -RANK ADAPTATION OF LARGE LAN GUAGE MODELS`.
+
+⚠️ **소문자 복원은 하지 않는다.** small-caps 조판은 작은 span이 원래 소문자였다는
+뜻이라 `LoRA: Low-Rank ...`까지 되살릴 수 있지만, 실측 결과 **검색이 달라지지 않았다**
+(대문자판과 원본 casing의 top-10 일치 10/10, 원 논문 순위 동일). 코드와 오작동 위험만
+늘어나므로 만들지 않았다.
 
 초록은 "Abstract"~"Introduction" 사이를 텍스트에서 잘라낸다.
 
@@ -46,7 +58,12 @@ def page_count(pdf_bytes: bytes) -> int:
 
 
 def _page_spans(pdf_bytes: bytes, pages: int = 2):
-    """(size, text, page_index) 리스트 + 전체 텍스트 반환."""
+    """(size, text, page_index, bbox) 리스트 + 전체 텍스트 반환.
+
+    bbox를 함께 들고 오는 이유는 **span 사이에 공백을 넣을지를 좌표로 판단**하기
+    위해서다 (_join_spans 참고). 텍스트만으로는 "같은 단어가 쪼개진 것"과 "다른
+    단어"를 구별할 수 없다.
+    """
     import fitz  # PyMuPDF
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -59,11 +76,63 @@ def _page_spans(pdf_bytes: bytes, pages: int = 2):
                 continue
             for line in block["lines"]:
                 for span in line["spans"]:
-                    t = span["text"].strip()
-                    if t:
-                        spans.append((round(span["size"], 1), t, i))
+                    # **strip 하지 않는다.** span 텍스트에 이미 들어 있는 앞뒤 공백이
+                    # 진짜 띄어쓰기인 경우가 있고(실측: ' M'), bbox는 그 공백까지
+                    # 포함해 잡히므로 좌표만으로는 복원할 수 없다.
+                    if span["text"].strip():
+                        spans.append(
+                            (round(span["size"], 1), span["text"], i, span["bbox"]))
     doc.close()
     return spans, "\n".join(texts)
+
+
+# span 사이 간격이 이 값(폰트 크기 대비 비율)을 넘으면 진짜 띄어쓰기로 본다.
+# 실측(LoRA 논문 ICLR 스타일 제목): 단어 **내부** 간격 0.85pt, 단어 **사이** 10.69pt.
+# 폰트 17.2pt 기준으로 0.05 → 0.86, 0.15 → 2.58이라 둘 사이가 넉넉히 벌어진다.
+_WORD_GAP_RATIO = 0.15
+# 같은 줄로 볼 y 허용 오차(폰트 크기 대비). 드롭캡은 큰 글자와 작은 글자의 윗변이
+# 어긋나므로(80.5 vs 83.1) 0으로 두면 매 글자가 새 줄로 잡힌다.
+_SAME_LINE_RATIO = 0.6
+
+
+def _join_spans(parts: list[tuple[str, tuple]], sizes: list[float]) -> str:
+    """제목 span들을 좌표를 보고 이어붙인다.
+
+    **모두 공백으로 잇고 정규식으로 복구하는 방식은 못 고치는 경우가 있다.** 실측
+    실패 사례(LoRA 논문): `L ORA: LOW -RANK ADAPTATION OF LARGE LAN GUAGE MODELS`.
+    드롭캡 조판이 한 단어를 세 조각('L','O','RA:')으로 쪼개면 "대문자 1개 + 공백 +
+    대문자 2자 이상" 규칙으로는 복구되지 않고, 줄 끝 하이픈('LAN-' / 'GUAGE')은
+    아예 다른 문제다.
+
+    좌표를 쓰면 규칙이 단순해진다:
+
+    - 같은 줄이고 간격이 좁으면 → 붙인다 (쪼개진 한 단어)
+    - 같은 줄이고 간격이 넓으면 → 공백 (다른 단어)
+    - 줄이 바뀌었는데 앞이 '-'로 끝나면 → **하이픈을 떼고** 붙인다 (줄바꿈 하이픈)
+    - 줄이 바뀌었으면 → 공백
+    """
+    if not parts:
+        return ""
+    out = [parts[0][0]]
+    for i in range(1, len(parts)):
+        text, bbox = parts[i]
+        _, prev_bbox = parts[i - 1]
+        size = sizes[i] or 1.0
+        same_line = abs(bbox[1] - prev_bbox[1]) <= size * _SAME_LINE_RATIO
+        already_spaced = out[-1].endswith(" ") or text.startswith(" ")
+        if same_line:
+            gap = bbox[0] - prev_bbox[2]
+            wide = gap > size * _WORD_GAP_RATIO
+            out.append(" " + text if (wide and not already_spaced) else text)
+        elif already_spaced:
+            out.append(text)
+        elif out[-1].rstrip().endswith("-"):
+            # 'LAN-' + 줄바꿈 + 'GUAGE' → 'LANGUAGE'. 하이픈을 남기면 단어가 깨진다.
+            out[-1] = out[-1].rstrip()[:-1]
+            out.append(text)
+        else:
+            out.append(" " + text)
+    return "".join(out)
 
 
 def _title_from_spans(spans) -> str:
@@ -72,28 +141,34 @@ def _title_from_spans(spans) -> str:
     제목이 두 줄로 나뉘어도 같은 크기이므로 자연스럽게 이어붙는다.
     저자(10pt)·소속·이메일은 크기가 작아 자동으로 배제된다.
     """
-    first_page = [(sz, t) for sz, t, pg in spans if pg == 0]
+    first_page = [(sz, t, bbox) for sz, t, pg, bbox in spans if pg == 0]
     if not first_page:
         return ""
 
-    # 헤더 잡동사니를 뺀 뒤 최대 크기를 찾는다 (arXiv 줄이 20pt인 경우가 있음)
-    candidates = [(sz, t) for sz, t in first_page if not _HEADER_CRUFT.search(t)]
+    # 헤더 잡동사니를 뺀 뒤 최대 크기를 찾는다 (arXiv 줄이 20pt인 경우가 있음).
+    #
+    # ⚠️ **글자가 없는 span(구두점만 있는 것)은 잡동사니 검사에서 제외한다.** 예전에는
+    # `^\W*$` 규칙이 이런 span을 통째로 버렸는데, 줄바꿈 하이픈이 자기 span으로
+    # 떨어져 나오는 조판에서는 그 하이픈이 사라져 단어가 붙지 않았다
+    # (실측: 'LAN-' + 'GUAGE'가 'LAN GUAGE'가 됐다).
+    candidates = [(sz, t, bbox) for sz, t, bbox in first_page
+                  if not (re.search(r"\w", t) and _HEADER_CRUFT.search(t))]
     if not candidates:
         return ""
 
-    max_size = max(sz for sz, _ in candidates)
+    max_size = max(sz for sz, _, _ in candidates)
     # 최대 크기의 75% 이상인 span을 제목으로 채택.
     # 허용폭을 넓게 잡는 이유: 드롭캡 조판(예: ICLR 스타일)은 첫 글자만 17.2pt,
     # 나머지는 13.8pt여서 좁게 잡으면 "R N N R"처럼 첫 글자만 남는다.
     # 저자(10pt)는 통상 제목의 60% 이하라 이 임계값에서도 배제된다.
     threshold = max_size * 0.75
-    parts = [t for sz, t in candidates if sz >= threshold]
+    picked = [(sz, t, bbox) for sz, t, bbox in candidates if sz >= threshold]
 
-    title = " ".join(parts).strip()
-    title = re.sub(r"\s+", " ", title)
-    # 드롭캡 조판 복원: 큰 첫 글자가 별도 span이라 "R ECURRENT"로 분리된다.
-    # 대문자 1개 + 공백 + 대문자 2자 이상 → 붙인다 ("R ECURRENT" → "RECURRENT").
-    title = re.sub(r"\b([A-Z]) ([A-Z]{2,})", r"\1\2", title)
+    # 공백 여부는 좌표로 판단한다 (_join_spans). 정규식 후처리로는 한 단어가 셋으로
+    # 쪼개진 경우와 줄바꿈 하이픈을 복구하지 못한다.
+    title = _join_spans([(t, bbox) for _, t, bbox in picked],
+                        [sz for sz, _, _ in picked])
+    title = re.sub(r"\s+", " ", title).strip()
     # 각주 기호 정리
     title = re.sub(r"[\*†‡§¶]", "", title).strip()
     return title[:MAX_TITLE_CHARS]

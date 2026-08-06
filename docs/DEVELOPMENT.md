@@ -397,9 +397,12 @@ lift도 Fisher 검정도 무의미하기 때문입니다. 되살리려면
 - [ ] **"정말 비슷한가"의 자동 평가** — `eval_retrieval.py`가 재던 aspect 예측이
       목표에서 빠졌고 대체가 없습니다. `similar_paper_matches`에 후보와 선정이 함께
       쌓이므로, 실사용이 모이면 "LLM이 검색 어디쯤에서 고르는가"부터 SQL로 잴 수 있습니다.
-- [ ] **제목 추출 개선** — 전부 대문자 제목에서 드롭캡 복원 정규식이 오작동합니다
-      (`L ORA: LOW -RANK ...`). 임베딩 품질에 영향을 주며, 스캔본 대응(Haiku 비전으로
-      1페이지에서 복원)과 함께 보면 좋습니다.
+- [x] **제목 추출 수정** — span을 잇는 기준을 공백+정규식에서 **bbox 좌표**로 바꿨습니다.
+      `L ORA: LOW -RANK ADAPTATION OF LARGE LAN GUAGE MODELS` →
+      `LORA: LOW-RANK ADAPTATION OF LARGE LANGUAGE MODELS`. 소문자 복원은 가능하지만
+      검색 결과가 바뀌지 않아(top-10 일치 10/10) 만들지 않았습니다.
+- [ ] **스캔본 대응** — 텍스트 레이어가 없는 PDF는 지금 422로 거부됩니다. Haiku 비전으로
+      1페이지에서 제목·초록을 복원하면 살릴 수 있습니다.
 - [x] **arXiv/S2 보강 실행** — 설계서 §20의 파이프라인을 2026-08-02에 전 단계
       실행했습니다(결과는 §25). alembic `0008`로 `papers.citation_count` 드리프트를
       먼저 복구해야 했습니다.
