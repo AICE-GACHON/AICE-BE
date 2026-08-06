@@ -42,6 +42,25 @@ class SimilarPaper(BaseModel):
         default=None, description="당락 경계 대비 차이. 편향 venue는 None")
 
 
+class PaperSelection(BaseModel):
+    """LLM이 후보 중에서 고른 논문 1편과 그 이유 (2단계 재정렬 결과).
+
+    1단계 검색은 제목·초록 임베딩만 보지만, 여기서는 입력 논문의 **PDF 원본**과
+    후보 목록을 함께 넘겨 본문·실험·참고문헌까지 읽고 고르게 한다. 검색 상위 후보
+    50편은 전부 코사인 0.93+ 대역이라 임베딩으로는 그 안에서 순위를 매길 수 없고
+    (설계서 §20), 그 구간을 실제로 가를 수 있는 것이 이 단계다.
+
+    ⚠️ `paper_id`는 **후보 목록과 대조해 검증된 값**이다. 모델이 지어낸 id는
+    graph/nodes.py에서 제거되므로, 여기 남은 것은 전부 실재하는 논문을 가리킨다.
+    """
+    paper_id: int
+    rank: int = Field(description="표시 순서 (1이 가장 비슷하다고 판정된 논문)")
+    reason: str = Field(description="왜 비슷하다고 판단했는지 — 사용자에게 그대로 노출")
+    confidence: str = Field(
+        description="high | medium | low. **숫자 점수가 아닌 이유는 의도한 설계다** — "
+                    "유사도 점수는 만들 수 없다(설계서 §20)")
+
+
 class ReviewDetail(BaseModel):
     """개별 리뷰 원문 (상세 보기 전용).
 
@@ -469,6 +488,15 @@ class Report(BaseModel):
     confidence: RetrievalConfidence = Field(
         default_factory=lambda: RetrievalConfidence())
     similar_papers: list[SimilarPaper] = Field(default_factory=list)
+
+    # --- 2단계 LLM 재정렬 결과 ---
+    selections: list[PaperSelection] = Field(
+        default_factory=list,
+        description="LLM이 검색 후보 중에서 고른 논문 (최대 5편). **화면에 보여줄 것은 "
+                    "이것이고 similar_papers는 후보 풀이다.** 비어 있을 수 있다 — "
+                    "검색 신뢰도가 weak이면 재정렬을 돌리지 않고, 정말 비슷한 논문이 "
+                    "5편이 안 되면 모델이 더 적게 고른다(빈 목록도 정직한 답이다).")
+
     review_patterns: list[ReviewPattern] = Field(default_factory=list)
     venue_trends: list[VenueTrend] = Field(default_factory=list)
     rating_context: RatingContext = Field(default_factory=lambda: RatingContext())

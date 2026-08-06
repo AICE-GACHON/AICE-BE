@@ -7,7 +7,8 @@ from typing import TypedDict
 
 from paper_assistant.retrieval.hybrid_search import SearchResult
 from paper_assistant.schemas import (
-    Report, ResubmissionFlow, ReviewPattern, SimilarityTag, VenueTrend)
+    PaperSelection, Report, ResubmissionFlow, RetrievalConfidence, ReviewPattern,
+    SimilarityTag, VenueTrend)
 
 
 class PipelineState(TypedDict, total=False):
@@ -19,8 +20,14 @@ class PipelineState(TypedDict, total=False):
     # --- 검색 (retrieval_node) ---
     query_embedding: list
     similar_papers: list[SearchResult]
+    # 검색 단계에서 판정한다. 재정렬이 이 값을 보고 돌릴지 말지 정하므로 종합까지
+    # 미룰 수 없다 — weak이면 LLM을 부르지 않는다(비용도, 잘못된 결과도 아낀다).
+    confidence: RetrievalConfidence
 
-    # --- 병렬 분석 3종 ---
+    # --- 병렬 분석 4종 ---
+    selections: list[PaperSelection]     # llm_rerank_node
+
+    # --- 병렬 분석 3종 (기존) ---
     similarity_tags: dict[int, list[SimilarityTag]]   # paper_id -> tags
     review_patterns: list[ReviewPattern]
     venue_trends: list[VenueTrend]

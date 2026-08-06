@@ -76,8 +76,12 @@ def test_report_is_json_serializable():
 
 
 def _synthesize(papers):
+    """종합 단계만 돌린다. 신뢰도는 **검색 단계가 계산해 state에 넣어 주므로**
+    여기서도 같은 함수로 채운다 — 종합이 자체 계산하지 않게 옮긴 뒤로는, 이걸
+    빼먹으면 기본값(strong)이 들어가 테스트가 조용히 무의미해진다."""
     state: PipelineState = {
         "query_title": "Q", "query_abstract": "A", "similar_papers": papers,
+        "confidence": nodes.confidence_from(papers),
         "similarity_tags": {p.paper_id: [] for p in papers},
         "review_patterns": [], "venue_trends": [],
     }
@@ -130,7 +134,7 @@ def test_graph_compiles_with_fake_embedder():
         dim = 768
     graph, _ = build(embedder=FakeEmbedder(), use_llm=False)
     node_names = set(graph.get_graph().nodes)
-    assert {"input", "retrieval", "similarity_tagging",
+    assert {"input", "retrieval", "llm_rerank", "similarity_tagging",
             "review_analysis", "venue_trend", "synthesis"} <= node_names
 
 
