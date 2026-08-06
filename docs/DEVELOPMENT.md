@@ -252,8 +252,8 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 | Corpus | `GET /api/papers` | 코퍼스 논문 목록 (venue/year/field/q 필터, limit/offset 페이지네이션) | - |
 | Corpus | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Corpus | `GET /api/papers/{paper_id}/reviews` | 그 논문의 리뷰 목록 | - |
-| Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
-| Corpus | `GET /api/papers/{paper_id}/story` | 심사 서사 — 재투고 궤적 + 리뷰·응답·수정 타임라인 + 요약 (**외부 API 실시간 조회 + LLM**, `paper_stories`에 캐시) | - |
+| Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**). IP 기준 **30회/시간** | - |
+| Corpus | `GET /api/papers/{paper_id}/story` | 심사 서사 — 재투고 궤적 + 리뷰·응답·수정 타임라인 + 요약 (**외부 API + LLM**, `paper_stories`에 캐시). IP 기준 **30회/시간**, `refresh=true`는 **로그인 필요** | -<br>(refresh만 필요) |
 | Onboarding | `POST /api/onboarding` | 회원가입 전 익명 온보딩 답변 저장 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
@@ -274,7 +274,18 @@ refresh_token은 JWT라 상태가 없어 개별 폐기가 불가능합니다. �
 
 인증 없이 열려 있는 엔드포인트(signup/login/google/refresh/onboarding)는 IP 기준
 rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signup/login/google
-10/분, refresh 20/분, onboarding 5/분. 저장소가 메모리라 워커를 여러 개로 늘리면
+10/분, refresh 20/분, onboarding 5/분.
+
+**`/papers/{id}/revisions`와 `/papers/{id}/story`도 30회/시간으로 묶여 있습니다.**
+이 둘만 외부 자원을 쓰기 때문입니다(OpenReview 2콜, `/story`는 LLM까지). 인증을 걸지
+않은 이유는 랜딩의 데모가 비로그인으로 `/story`를 부르기 때문이고, 캐시된 논문을 다시
+읽는 것은 DB 조회 1번이라 비용이 없습니다 — 막아야 할 것은 **캐시에 없는 논문을 연달아
+훑는 것**이라 시간당 상한이 맞습니다.
+
+⚠️ **`refresh=true`만 로그인을 요구합니다.** 캐시를 우회하므로 같은 논문에 반복하면
+시간당 상한을 무의미하게 만들고 호출마다 LLM이 돕니다. 비로그인 요청은 조용히 캐시를
+주지 않고 **401로 거절**합니다 — 조용히 주면 호출자가 방금 다시 만든 결과를 받았다고
+오해합니다. 저장소가 메모리라 워커를 여러 개로 늘리면
 워커별로 따로 세므로, 그때는 Redis 저장소로 바꿔야 합니다. 백엔드 테스트
 (`tests/test_backend_auth.py`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다.
 
