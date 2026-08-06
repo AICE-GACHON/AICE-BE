@@ -176,6 +176,21 @@ def test_schema_requires_every_field(field):
     assert item["additionalProperties"] is False
 
 
+def test_every_llm_call_path_logs_usage():
+    """비용은 추정이 아니라 실측으로 남아야 한다.
+
+    한 경로라도 로깅이 빠지면 그 단계의 비용만 장부에서 사라진다 — 실제로
+    structured_with_pdf에만 붙어 있어 종합(text) 비용이 안 보이던 적이 있다.
+    """
+    import inspect as _i
+
+    from paper_assistant.graph.llm import ClaudeLLM
+
+    for name in ("text", "structured_with_pdf"):
+        src = _i.getsource(getattr(ClaudeLLM, name))
+        assert "_log_usage" in src, f"{name}()에 사용량 로깅이 없다"
+
+
 def test_schema_has_no_numeric_similarity_field():
     """유사도 점수는 만들 수 없다(설계서 §20). 스키마 자체에서 배제한다."""
     from paper_assistant.graph.nodes import _SELECTION_SCHEMA

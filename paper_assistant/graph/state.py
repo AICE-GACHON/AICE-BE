@@ -8,7 +8,7 @@ from typing import TypedDict
 from paper_assistant.retrieval.hybrid_search import SearchResult
 from paper_assistant.schemas import (
     PaperSelection, Report, ResubmissionFlow, RetrievalConfidence, ReviewPattern,
-    SimilarityTag, VenueTrend)
+    SelectedPaper, SimilarityTag, VenueTrend)
 
 
 class PipelineState(TypedDict, total=False):
@@ -24,8 +24,10 @@ class PipelineState(TypedDict, total=False):
     # 미룰 수 없다 — weak이면 LLM을 부르지 않는다(비용도, 잘못된 결과도 아낀다).
     confidence: RetrievalConfidence
 
-    # --- 병렬 분석 4종 ---
-    selections: list[PaperSelection]     # llm_rerank_node
+    # --- 2단계 선정 (llm_rerank → review_fetch) ---
+    selections: list[PaperSelection]          # LLM의 원출력 (내부용)
+    selected_papers: list[SelectedPaper]      # 리뷰까지 붙인 것 (Report에 실린다)
+    selection_points: dict[int, list[dict]]   # 근거 풀 재료 (paper_id -> 지적 문장)
 
     # --- 병렬 분석 3종 (기존) ---
     similarity_tags: dict[int, list[SimilarityTag]]   # paper_id -> tags

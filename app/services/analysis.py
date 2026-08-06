@@ -75,19 +75,24 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
         prediction.status = "done"
         prediction.completed_at = _now()
 
-        # 근거 추적: 이 분석이 어떤 논문을 보고 나왔는지 역방향 조회용으로 남긴다.
+        # 근거 추적: 검색 후보 전부와, 그중 LLM이 고른 것을 남긴다.
         #
-        # ⚠️ selected/llm_rank는 아직 검색 순위를 그대로 옮겨 적는다. LLM 재정렬
-        # 노드가 들어오면(개편 3단계) 이 자리에서 실제 선정 결과를 받아 쓰게 된다.
-        # 그때까지는 "리포트에 실린 논문 = 선정된 논문"이라 의미가 어긋나지 않는다.
+        # 후보까지 남기는 이유는 **"검색이 뽑은 것"과 "LLM이 고른 것"의 관계가 이
+        # 파이프라인의 품질 지표**이기 때문이다. 실호출에서 LLM이 검색 42·47위를
+        # 고른 사례가 나왔고(재설계 문서 §4.4.1), 그런 일이 계속 생기면 후보 수를
+        # 늘려야 한다는 신호다. 유사도에는 사람 라벨 없는 정답지가 없으므로 실사용
+        # 분석에서 모이는 이 신호가 현실적으로 유일한 대규모 평가 데이터다.
+        chosen = {p.paper_id: p for p in report.selected_papers}
         for paper in report.similar_papers:
+            pick = chosen.get(paper.paper_id)
             db.add(SimilarPaperMatch(
                 prediction_id=prediction.prediction_id,
                 paper_id=paper.paper_id,
-                rank=paper.rank,
+                rank=paper.rank,                       # 검색 순위
                 match_type=paper.match_type,
-                selected=True,
-                llm_rank=paper.rank,
+                selected=pick is not None,
+                llm_rank=pick.rank if pick else None,  # 화면 순서
+                selection_reason=pick.reason if pick else None,
             ))
         db.commit()
         log.info("분석 완료 prediction_id=%s 유사논문=%d 신뢰도=%s",

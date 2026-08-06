@@ -13,7 +13,8 @@ from paper_assistant.embedding.specter2 import (
     CONFIDENCE_MESSAGES, retrieval_confidence)
 from paper_assistant.graph.clustering import aggregate_by_aspect
 from paper_assistant.graph.evidence import (
-    build_evidence, format_for_prompt, validate_citations)
+    build_evidence, build_evidence_for_selected, format_for_prompt,
+    validate_citations)
 from paper_assistant.graph.llm import (
     HAIKU, RERANK_EFFORT, RERANK_MAX_TOKENS, SONNET, SONNET_EFFORT,
     SONNET_MAX_TOKENS)
@@ -23,8 +24,8 @@ from paper_assistant.db.stats import (
     conference_of, load_base_rates, load_venue_stats)
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
-    PaperSelection, Report, ResubmissionFlow, RetrievalConfidence, ReviewPattern,
-    SimilarityTag, SimilarPaper, VenueTrend)
+    PaperSelection, Report, ResubmissionFlow, RetrievalConfidence, ReviewDetail,
+    ReviewPattern, SelectedPaper, SimilarityTag, SimilarPaper, VenueTrend)
 
 log = logging.getLogger(__name__)
 
@@ -218,6 +219,88 @@ def _validated_selections(raw: list, papers) -> list[PaperSelection]:
         if len(out) == RERANK_LIMIT:
             break       # 스키마로 배열 길이를 못 거는 대신 여기서 자른다
     return out
+
+
+# ------------------------------------------- 선정 논문의 리뷰 조회 (no LLM)
+MAX_POINTS_PER_PAPER = 3    # 근거 풀에 넣을 지적 문장 수 (논문당)
+
+
+def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
+    """선정된 5편의 **리뷰 전문**을 가져온다 — 이 서비스가 실제로 파는 것.
+
+    지적항목(review_points)도 함께 읽지만 그건 근거 풀(evidence)을 만들기 위한
+    것이고, Report에는 중복해 싣지 않는다. 근거 항목이 이미 그 문장을 들고 있다.
+    """
+    selections = state.get("selections", [])
+    if not selections:
+        return {"selected_papers": [], "selection_points": {}}
+
+    ids = [s.paper_id for s in selections]
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, openreview_id, forum_id, title, venue, year, decision,
+                   meta_review
+            FROM papers WHERE id = ANY(%s)
+            """, (ids,))
+        meta = {r[0]: r[1:] for r in cur.fetchall()}
+
+        cur.execute(
+            """
+            SELECT paper_id, rating, rating_raw, confidence, summary, strengths,
+                   weaknesses, questions, needs_llm_split
+            FROM reviews WHERE paper_id = ANY(%s)
+            ORDER BY paper_id, rating DESC NULLS LAST, id
+            """, (ids,))
+        reviews: dict[int, list[ReviewDetail]] = {}
+        for r in cur.fetchall():
+            reviews.setdefault(r[0], []).append(ReviewDetail(
+                rating=float(r[1]) if r[1] is not None else None,
+                rating_raw=r[2],
+                confidence=float(r[3]) if r[3] is not None else None,
+                summary=r[4], strengths=r[5], weaknesses=r[6], questions=r[7],
+                is_unsplit=bool(r[8])))
+
+        # 근거로 인용할 지적 문장. 미분리 리뷰에서 나온 것은 본문 전체를 weakness로
+        # 라벨링한 것이라 '지적'이라 단정할 수 없어 뒤로 민다 (from_unsplit 오름차순).
+        cur.execute(
+            """
+            SELECT rp.paper_id, rp.id, rp.aspect, rp.text, r.needs_llm_split
+            FROM review_points rp JOIN reviews r ON r.id = rp.review_id
+            WHERE rp.paper_id = ANY(%s) AND rp.sentiment = 'weakness'
+            ORDER BY rp.paper_id, r.needs_llm_split, (rp.aspect = 'other'), rp.id
+            """, (ids,))
+        points: dict[int, list[dict]] = {}
+        for pid, point_id, aspect, text, unsplit in cur.fetchall():
+            bucket = points.setdefault(pid, [])
+            if len(bucket) < MAX_POINTS_PER_PAPER:
+                bucket.append({"point_id": point_id, "aspect": aspect,
+                               "text": text, "from_unsplit": bool(unsplit)})
+
+    selected: list[SelectedPaper] = []
+    for s in selections:
+        if s.paper_id not in meta:
+            # 선정과 조회 사이에 사라진 논문. 여기서 예외를 내면 분석 전체가 죽는다.
+            log.warning("선정된 논문을 조회하지 못했습니다: %s", s.paper_id)
+            continue
+        or_id, forum_id, title, venue, year, decision, meta_review = meta[s.paper_id]
+        rs = reviews.get(s.paper_id, [])
+        ratings = [r.rating for r in rs if r.rating is not None]
+        selected.append(SelectedPaper(
+            paper_id=s.paper_id, openreview_id=or_id, title=title, venue=venue,
+            year=year, decision=decision,
+            # 포럼은 forum_id 기준이지만 미수집 논문이 있어 openreview_id로 폴백한다.
+            openreview_url=f"https://openreview.net/forum?id={forum_id or or_id}",
+            pdf_url=f"https://openreview.net/pdf?id={or_id}",
+            rank=len(selected) + 1, reason=s.reason, confidence=s.confidence,
+            meta_review=meta_review, reviews=rs,
+            avg_rating=round(sum(ratings) / len(ratings), 2) if ratings else None,
+            rating_count=len(rs),
+            rating_spread=round(max(ratings) - min(ratings), 2) if ratings else None,
+        ))
+    return {"selected_papers": selected,
+            "selection_points": {p.paper_id: points.get(p.paper_id, [])
+                                 for p in selected}}
 
 
 # ----------------------------------------------- similarity tagging (LLM)
@@ -416,11 +499,18 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
     # 갈라질 수 있다.
     confidence = state.get("confidence") or RetrievalConfidence()
 
-    # 검색된 원문(리뷰 지적 문장 + AC 총평)을 인용 가능한 근거 풀로 만든다.
-    # LLM을 끄더라도 채운다 — 근거 목록은 생성 결과가 아니라 검색 결과다.
-    evidence_pool = build_evidence(patterns, papers)
+    # 근거 풀은 **선정 5편의 리뷰 원문**에서 만든다. 집계에서 뽑으면 화면에 없는
+    # 논문의 문장이 근거로 붙는다. LLM을 끄더라도 채운다 — 근거 목록은 생성 결과가
+    # 아니라 조회 결과다.
+    selected = state.get("selected_papers", [])
+    if selected:
+        evidence_pool = build_evidence_for_selected(
+            selected, state.get("selection_points", {}))
+    else:
+        # 재정렬을 못 돌린 경우(weak·LLM off·PDF 없음)에도 근거는 남긴다.
+        evidence_pool = build_evidence(patterns, papers)
 
-    summary, citations = _summary(state, similar, patterns, trends,
+    summary, citations = _summary(state, selected, patterns, trends,
                                   rating_context, confidence, evidence_pool, llm)
 
     report = Report(
@@ -428,7 +518,7 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         query_abstract=state.get("query_abstract", ""),
         confidence=confidence,
         similar_papers=similar,
-        selections=state.get("selections", []),
+        selected_papers=selected,
         review_patterns=patterns,
         venue_trends=trends,
         rating_context=rating_context,
@@ -480,152 +570,91 @@ def _first_label(evidence_pool, aspect: str) -> str:
     return ""
 
 
-def _summary(state, similar, patterns, trends, rating_context, confidence,
+def _summary(state, selected, patterns, trends, rating_context, confidence,
              evidence_pool, llm) -> tuple[str, list[str]]:
-    """(요약 마크다운, 실제로 인용된 근거 라벨) 반환."""
-    distinctive = [p for p in patterns if p.is_distinctive]
-    risky = _risky_first(patterns)
-    rc = rating_context
+    """(요약 마크다운, 실제로 인용된 근거 라벨) 반환.
+
+    **주어는 항상 유사 논문이다.** "당신은 X를 지적받을 것입니다"가 아니라 "비슷한
+    논문들은 이런 지적을 받았습니다" — 지적 범주 *예측*은 '검색 없음' 베이스라인에
+    졌고(설계서 §24), 잘 되는 것은 구체적인 지적 *문장*을 근거로 가져오는 쪽이다.
+    이 경계를 넘으면 검증되지 않은 것을 파는 것이 된다.
+    """
+    if not selected:
+        return _no_selection_summary(confidence), []
 
     if llm is None:
-        # 스텁: 구조화 데이터로 결정론적 요약
-        lines = [f"## 유사 논문 {len(similar)}편"]
-        # 신뢰할 수 없는 결과면 맨 앞에서 알린다 — 뒤에 묻으면 아무도 안 읽는다
-        if not confidence.is_reliable:
-            lines.insert(0, f"> ⚠️ **{confidence.message}**\n")
-        # 스텁도 근거 라벨을 단다 — LLM을 꺼도 "이 결론의 출처"가 추적된다.
-        if distinctive:
-            lines.append("- 이 주제 특유의 지적: " + ", ".join(
-                f"{p.label}({p.paper_count}/{p.total_papers}, lift {p.lift})"
-                f"{_first_label(evidence_pool, p.aspect)}"
-                for p in distinctive[:3]))
-        else:
-            lines.append("- 이 주제 특유의 지적 없음 (전부 코퍼스 평균 수준)")
-        if risky:
-            p, _ = risky[0]
-            lines.append(
-                f"- 당락에 실제로 영향: {p.label} — 지적받은 {p.decided_with}편 중 "
-                f"{p.accept_with}편 통과({p.accept_rate_with*100:.0f}%) vs "
-                f"미지적 {p.decided_without}편 중 {p.accept_without}편"
-                f"({p.accept_rate_without*100:.0f}%), p={p.contrast_p_value}"
-                f"{_first_label(evidence_pool, p.aspect)}")
-        else:
-            lines.append("- 당락 격차가 유의한 지적 없음 (이웃 표본이 작아 판단 보류)")
-        lines += _rating_lines(rc)
-        if trends:
-            lines.append("- 게재 경향: " + ", ".join(
-                f"{t.venue} {t.accept_count}/{t.paper_count}"
-                + (" (표본 편향)" if t.is_coverage_biased else "")
-                for t in trends[:3]))
-        # 스텁이 만든 라벨도 같은 검증을 통과시킨다 (경로를 하나로 유지).
-        return validate_citations("\n".join(lines), evidence_pool)
+        return _stub_summary(selected, evidence_pool, confidence)
 
     facts = {
         "query": state["query_title"],
         "retrieval_confidence": confidence.level,
-        "similar_papers": [{"title": s.title, "venue": s.venue,
-                            "decision": s.decision, "match_type": s.match_type}
-                           for s in similar[:10]],
-        # 검색된 **원문**. 통계만 주면 "베이스라인 비교 부족" 같은 라벨을 되풀이할
-        # 뿐이라, 실제 리뷰 문장과 AC 총평을 함께 넣어 구체적으로 쓰게 한다.
-        # 이 항목이 이 파이프라인을 검색 증강 생성(RAG)으로 만드는 지점이다.
+        "papers": [{
+            "title": p.title,
+            "venue": p.venue,
+            "year": p.year,
+            "decision": p.decision,
+            "why_selected": p.reason,
+            "selection_confidence": p.confidence,
+            "avg_rating": p.avg_rating,
+            "rating_spread": p.rating_spread,
+        } for p in selected],
+        # 검색된 **원문**. 이 항목이 이 요약을 검색 증강 생성(RAG)으로 만든다.
         "evidence": format_for_prompt(evidence_pool),
-        # lift와 당락 대조를 같이 넘긴다. 빈도만 주면 모델이 "베이스라인 비교를
-        # 강화하세요" 같은 코퍼스 상수를 결론처럼 써버린다 (§18).
-        "review_patterns": [{
-            "label": p.label,
-            "observed": f"{p.paper_count}/{p.total_papers}",
-            "corpus_base_rate": p.base_rate,
-            "lift": p.lift,
-            "distinctive": p.is_distinctive,
-            "accept_rate_if_criticized": p.accept_rate_with,
-            "accept_rate_if_not": p.accept_rate_without,
-            "contrast_sample": f"{p.decided_with} vs {p.decided_without}",
-            "contrast_significant": p.is_contrast_significant,
-        } for p in patterns],
-        "venue_trends": [{
-            "venue": t.venue,
-            "accept": f"{t.accept_count}/{t.paper_count}",
-            "corpus_accept_rate": t.corpus_accept_rate,
-            "accept_lift": t.accept_lift,
-            "coverage_biased": t.is_coverage_biased,
-        } for t in trends],
-        "ratings": {
-            "neighbor_mean": rc.neighbor_mean,
-            "accepted_mean": rc.accepted_mean,
-            "rejected_mean": rc.rejected_mean,
-            "rated_papers": rc.rated_papers,
-            "accept_threshold": rc.threshold,
-            "threshold_venue": rc.threshold_venue,
-            "reviewer_split_papers": rc.split_papers,
-            "coverage_biased_venues": rc.biased_venues,
-        } if rc and rc.rated_papers else None,
     }
     system = (
-        "You are a research assistant. Given structured findings about papers similar "
-        "to a query, write a concise Korean markdown briefing (under 250 words).\n"
-        "FIRST, check retrieval_confidence. If it is 'weak', the corpus has no papers "
-        "on this topic and every finding below is noise — say so in the first line and "
-        "keep the rest to two sentences. If 'moderate', note that matches are from "
-        "adjacent fields before continuing. Never present weak-confidence results as "
-        "real findings.\n"
-        "Otherwise cover: "
-        "what similar work exists, which review criticisms are DISTINCTIVE to this topic, "
-        "and where such papers get published. Be concrete; cite the counts.\n"
-        "Critical: a criticism with lift near 1.0 is the corpus-wide norm for ML papers "
-        "(e.g. 79% of all papers are criticized on baselines) — never present it as a "
-        "finding about this topic. Lead with distinctive=true patterns, and with "
-        "criticisms whose accept_rate_if_criticized is far below accept_rate_if_not. "
-        "Only state an accept-rate gap as a conclusion when contrast_significant is true; "
-        "otherwise the sample is too small — mention it as tentative or omit it. "
-        "If nothing is distinctive, say so plainly rather than manufacturing an "
-        "insight.\n"
-        "The two measures answer different questions and are independent. Lift compares "
-        "this neighbourhood's criticism rate against the whole corpus (is this topic "
-        "unusual?). The accept-rate contrast compares criticised vs uncriticised papers "
-        "WITHIN this neighbourhood (did this criticism cost them?). A criticism can be "
-        "corpus-typical and still separate accept from reject here. Never explain one "
-        "measure with the other, and never claim an accept-rate gap is or is not typical "
-        "of the corpus — you are given no corpus-wide contrast data, so that comparison "
-        "cannot be made.\n"
-        "Review scores: state the neighborhood mean and, when accept_threshold is "
-        "given, what score this topic needs to clear. Never compare raw scores "
-        "across different venues — the scales differ.\n"
-        "Any venue in coverage_biased_venues publishes reviews mainly for ACCEPTED "
-        "papers, so its accept rate is a sampling artifact, not a real acceptance "
-        "rate — never tell the user that venue is easier to get into. Use accept_lift "
-        "(neighborhood vs that venue's own corpus) for relative statements instead.\n"
-        "GROUNDING: the `evidence` array holds VERBATIM text retrieved from the "
-        "corpus — real reviewer criticisms (kind=review_point) and area-chair "
-        "meta-reviews (kind=meta_review). Ground your claims in it: when a sentence "
-        "rests on a specific criticism, append that item's label in brackets, e.g. "
-        "[E1] or [M2]. Combine as [E1, E2]. Prefer naming the concrete objection "
-        "('evaluated only on QM9') over the generic category label. "
-        "Cite ONLY labels present in `evidence` — a label you invent will be stripped "
-        "and the sentence will look unsupported. Statistics (counts, lift, accept "
-        "rates) need no citation; they come from the aggregates above. "
-        "Do not quote evidence text at length — paraphrase in Korean.\n"
+        "You are a research assistant. A researcher uploaded their paper. We found "
+        "the papers below to be genuinely similar to it, and we have the reviews those "
+        "papers actually received. Write a concise Korean markdown briefing "
+        "(under 250 words) about WHAT REVIEWERS SAID ABOUT THESE PAPERS.\n"
+        "\n"
+        "THE ONE RULE: the subject of every sentence is the similar papers, never the "
+        "reader's paper. Write '비슷한 논문 3편이 실험 규모를 지적받았습니다', never "
+        "'당신의 논문은 실험 규모를 지적받을 것입니다'. We have not analysed the "
+        "reader's paper and cannot predict its reviews — saying otherwise sells "
+        "something we did not measure. Do not write '예상 지적', '받을 것으로 "
+        "보입니다', or any forward-looking phrasing about the reader's work.\n"
+        "\n"
+        "FIRST, check retrieval_confidence. If 'weak', say plainly in the first line "
+        "that the corpus has essentially no papers on this topic and keep the rest to "
+        "two sentences. If 'moderate', note the matches come from adjacent fields.\n"
+        "\n"
+        "Otherwise cover, in this order: what these papers have in common with the "
+        "reader's work (use why_selected — it is the judgement that picked them); what "
+        "reviewers criticised, concretely; and how those papers fared.\n"
+        "\n"
+        "Be specific. '베이스라인 비교가 부족하다는 지적' is a category and says almost "
+        "nothing — the corpus-wide rate for that is 78.8%, so it is closer to a constant "
+        "than a finding. Name the actual objection: 'QM9 하나로만 평가했다는 지적'. The "
+        "evidence array is where those sentences are.\n"
+        "\n"
+        "GROUNDING: `evidence` holds VERBATIM text retrieved from the corpus — real "
+        "reviewer criticisms (kind=review_point) and area-chair meta-reviews "
+        "(kind=meta_review). When a sentence rests on a specific criticism, append that "
+        "item's label in brackets: [E1], or [E1, E2]. Cite ONLY labels present in "
+        "`evidence` — an invented label is stripped and the sentence ends up looking "
+        "unsupported. Paraphrase in Korean; do not quote at length.\n"
         "A citation is a specific claim: that THIS item's text supports THIS sentence, "
         "about THIS item's paper. Before appending a label, re-read the item — does it "
         "actually say what your sentence says, about the paper your sentence names? If "
         "not, drop the label or rewrite the sentence. A real label on a sentence it does "
-        "not support is worse than no citation at all, because it looks verified.\n"
-        "Every E* item is a CRITICISM a reviewer raised. The corpus records no strengths "
-        "at all, so the pool contains none and you have no evidence for any claim that "
-        "something is a strength, is well done, or is exemplary — do not make such claims, "
-        "and never attach a citation to one.\n"
-        "WRITING FOR THE READER: the input keys above (distinctive, lift, "
-        "contrast_significant, accept_lift, coverage_biased, corpus, corpus-wide, "
-        "base_rate …) are the shape of "
-        "the data handed to you, not vocabulary for the reader. Write every one of them "
-        "as plain Korean: '이 주제에 특히 두드러진 지적', '코퍼스 평균의 1.6배', "
-        "'표본이 충분해 우연으로 보기 어렵다', '채택 논문 위주로만 공개된 학회'. "
-        "The reader has never seen the JSON and cannot look a key up. Bracketed "
-        "citation labels ([E1], [M2]) are the sole exception — keep those verbatim.\n"
+        "not support is worse than no citation, because it looks verified.\n"
+        "Every E* item is a CRITICISM. The corpus records no strengths at all, so you "
+        "have no evidence for any claim that something is a strength or is well done — "
+        "do not make such claims, and never attach a citation to one.\n"
+        "\n"
+        "Ratings: avg_rating scales differ by venue and year (ICLR 2020 was 1-8, others "
+        "1-10), so never compare raw scores across papers. A large rating_spread means "
+        "reviewers disagreed — that is worth saying; the number itself is not.\n"
+        "Do NOT compute an acceptance rate from these papers. Five papers chosen for "
+        "similarity are not a sample of anything.\n"
+        "\n"
+        "WRITING FOR THE READER: the input keys (why_selected, rating_spread, "
+        "selection_confidence, retrieval_confidence …) are the shape of the data handed "
+        "to you, not vocabulary for the reader — they have never seen the JSON. "
+        "Bracketed citation labels are the sole exception; keep those verbatim.\n"
         "LENGTH: about 250 words. Achieve it by covering fewer things, not by "
-        "compressing sentences into fragments — every sentence stays complete and "
-        "readable. If you must drop something, drop the detail that would not change "
-        "what the reader does next.\n"
+        "compressing sentences into fragments. Every sentence stays complete and "
+        "readable.\n"
         "Do not invent facts.")
     raw = llm.text(SONNET, system, json.dumps(facts, ensure_ascii=False),
                    max_tokens=SONNET_MAX_TOKENS,
@@ -633,3 +662,40 @@ def _summary(state, similar, patterns, trends, rating_context, confidence,
                    output_config={"effort": SONNET_EFFORT})
     # 모델이 지어낸 라벨은 여기서 제거된다 — 남은 인용은 전부 실제 원문을 가리킨다.
     return validate_citations(raw, evidence_pool)
+
+
+def _no_selection_summary(confidence) -> str:
+    """고른 논문이 없을 때. **후보 풀을 대신 보여주지 않는다.**
+
+    비슷한 논문이 없다는 것이 이 경우의 정직한 답이고, 후보로 메우면 2단계를 넣은
+    이유가 통째로 무효가 된다.
+    """
+    if not confidence.is_reliable:
+        return (f"> ⚠️ **{confidence.message}**\n\n"
+                "비슷한 논문을 찾지 못해 보여드릴 리뷰가 없습니다.")
+    return ("비슷하다고 판단할 만한 논문을 찾지 못했습니다. 검색에는 걸렸지만 "
+            "본문을 대조한 결과 같은 문제를 다루는 논문이 아니었습니다.")
+
+
+def _stub_summary(selected, evidence_pool, confidence) -> tuple[str, list[str]]:
+    """LLM 없이 조회 결과만으로 만드는 결정론적 요약 ($0, 배선 검증용).
+
+    스텁도 근거 라벨을 단다 — LLM을 꺼도 "이 결론의 출처"가 추적되어야 경로가
+    하나로 유지된다 (validate_citations를 같이 통과시킨다).
+    """
+    lines = []
+    if not confidence.is_reliable:
+        lines.append(f"> ⚠️ **{confidence.message}**\n")
+    lines.append(f"## 비슷한 논문 {len(selected)}편이 받은 리뷰")
+    by_paper: dict[int, list[str]] = {}
+    for e in evidence_pool:
+        if e.kind == "review_point":
+            by_paper.setdefault(e.paper_id, []).append(e.label)
+    for p in selected:
+        labels = by_paper.get(p.paper_id, [])
+        cite = f" [{', '.join(labels)}]" if labels else ""
+        rating = (f", 평균 {p.avg_rating}점/{p.rating_count}건"
+                  if p.avg_rating is not None else "")
+        lines.append(f"- **{p.title}** ({p.venue}, {p.decision}{rating}){cite}")
+        lines.append(f"  - 선정 이유: {p.reason}")
+    return validate_citations("\n".join(lines), evidence_pool)

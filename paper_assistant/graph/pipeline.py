@@ -43,6 +43,7 @@ def build(embedder=None, use_llm: bool | None = None):
     g.add_node("input", bind(nodes.input_node))
     g.add_node("retrieval", bind(nodes.retrieval_node))
     g.add_node("llm_rerank", bind(nodes.llm_rerank_node))
+    g.add_node("review_fetch", bind(nodes.review_fetch_node))
     g.add_node("similarity_tagging", bind(nodes.similarity_tagging_node))
     g.add_node("review_analysis", bind(nodes.review_analysis_node))
     g.add_node("venue_trend", bind(nodes.venue_trend_node))
@@ -53,11 +54,12 @@ def build(embedder=None, use_llm: bool | None = None):
     # retrieval → 4개 병렬 분기. llm_rerank는 나머지 셋과 독립이라 같은 층에 둔다
     # (셋 다 similar_papers만 읽고 서로의 결과를 쓰지 않는다).
     g.add_edge("retrieval", "llm_rerank")
+    g.add_edge("llm_rerank", "review_fetch")   # 선정된 뒤에야 리뷰를 읽을 수 있다
     g.add_edge("retrieval", "similarity_tagging")
     g.add_edge("retrieval", "review_analysis")
     g.add_edge("retrieval", "venue_trend")
     # 넷 모두 완료 후 synthesis (fan-in)
-    g.add_edge("llm_rerank", "synthesis")
+    g.add_edge("review_fetch", "synthesis")
     g.add_edge("similarity_tagging", "synthesis")
     g.add_edge("review_analysis", "synthesis")
     g.add_edge("venue_trend", "synthesis")

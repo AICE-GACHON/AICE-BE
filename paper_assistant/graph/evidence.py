@@ -31,6 +31,49 @@ MAX_META_TEXT = 700     # 메타리뷰 1건 (AC 총평이라 길다)
 _CITE_BLOCK = re.compile(r"\[((?:[EM]\d+)(?:\s*,\s*[EM]\d+)*)\]")
 
 
+def build_evidence_for_selected(selected, points_by_paper: dict[int, list[dict]],
+                                max_per_paper: int = MAX_POINTS_PER_ASPECT,
+                                max_meta: int = MAX_META_REVIEWS
+                                ) -> list[EvidenceItem]:
+    """**선정된 5편**의 리뷰 원문으로 근거 풀을 만든다.
+
+    예전에는 aspect 집계(ReviewPattern)의 대표 문장에서 뽑았다. 그때는 이웃 20편의
+    통계가 결론이었기 때문이다. 지금 결론은 "이 5편이 이런 지적을 받았다"이므로,
+    근거도 **그 5편에서 직접** 나와야 한다 — 집계에서 뽑으면 화면에 없는 논문의
+    문장이 근거로 붙을 수 있다.
+
+    E* = 지적 문장, M* = AC 총평. 라벨은 여기서 부여하고 프롬프트와 응답 검증이
+    같은 라벨을 쓴다 (validate_citations).
+    """
+    evidence: list[EvidenceItem] = []
+    for paper in selected:
+        for point in points_by_paper.get(paper.paper_id, [])[:max_per_paper]:
+            evidence.append(EvidenceItem(
+                label=f"E{len(evidence) + 1}",
+                kind="review_point",
+                text=point["text"][:MAX_TEXT],
+                paper_id=paper.paper_id,
+                paper_title=paper.title,
+                review_point_id=point.get("point_id"),
+                aspect=point.get("aspect"),
+                from_unsplit_review=bool(point.get("from_unsplit")),
+            ))
+
+    n_meta = 0
+    for paper in selected:
+        if n_meta >= max_meta:
+            break
+        text = (paper.meta_review or "").strip()
+        if not text:
+            continue
+        n_meta += 1
+        evidence.append(EvidenceItem(
+            label=f"M{n_meta}", kind="meta_review", text=text[:MAX_META_TEXT],
+            paper_id=paper.paper_id, paper_title=paper.title,
+            decision=paper.decision))
+    return evidence
+
+
 def build_evidence(patterns: list[ReviewPattern], papers,
                    max_aspects: int = MAX_ASPECTS,
                    max_per_aspect: int = MAX_POINTS_PER_ASPECT,

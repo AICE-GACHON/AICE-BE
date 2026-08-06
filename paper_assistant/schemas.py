@@ -42,8 +42,52 @@ class SimilarPaper(BaseModel):
         default=None, description="당락 경계 대비 차이. 편향 venue는 None")
 
 
+class SelectedPaper(BaseModel):
+    """**화면의 주인공** — LLM이 고른 논문 1편과 그 논문이 실제로 받은 리뷰.
+
+    이 서비스가 하는 말은 "당신은 X를 지적받을 것입니다"가 아니라 "비슷한 논문들은
+    이런 지적을 받았습니다"이고(README), 그 문장의 근거가 되는 단위가 이것이다.
+    `Report.similar_papers`는 검색 후보 풀이고 **사용자에게 보여줄 것은 이쪽이다.**
+
+    리뷰 전문을 Report에 함께 싣는 이유는 5편뿐이기 때문이다. 이웃 20편일 때는
+    대부분 열람되지 않아 별도 조회로 뺐지만(PaperDetail 주석), 5편은 전부 보여주는
+    것이 목적이라 화면마다 5번씩 더 부르는 편이 낭비다.
+    """
+    # --- 어떤 논문인가 ---
+    paper_id: int
+    openreview_id: str
+    title: str
+    venue: str
+    year: int
+    decision: str
+    openreview_url: str = Field(description="리뷰 원본을 직접 확인할 수 있는 링크")
+    pdf_url: str
+
+    # --- 왜 골랐는가 (2단계 판정) ---
+    rank: int = Field(description="표시 순서 (1이 가장 비슷하다고 판정된 논문)")
+    reason: str = Field(description="왜 비슷한지 — 사용자에게 그대로 노출")
+    confidence: str = Field(
+        description="high | medium | low. **숫자 점수가 아닌 이유는 의도한 설계다** — "
+                    "유사도 점수는 만들 수 없다(설계서 §20)")
+
+    # --- 무슨 리뷰를 받았는가 (본론) ---
+    meta_review: str | None = Field(default=None, description="AC 총평")
+    reviews: list[ReviewDetail] = Field(
+        default_factory=list,
+        description="이 논문이 받은 리뷰 전문. **is_unsplit이 참인 리뷰는 강/약점이 "
+                    "분리되지 않아 weaknesses에 본문 전체가 들어 있다** — '지적'으로 "
+                    "표시하지 말고 '리뷰 본문'으로 한 덩어리 보여줄 것")
+    avg_rating: float | None = None
+    rating_count: int = 0
+    rating_spread: float | None = Field(
+        default=None, description="최고-최저 점수 차. 크면 리뷰어 의견이 갈렸다는 뜻")
+
+
 class PaperSelection(BaseModel):
-    """LLM이 후보 중에서 고른 논문 1편과 그 이유 (2단계 재정렬 결과).
+    """LLM이 후보 중에서 고른 논문 1편과 그 이유 (2단계 재정렬의 원출력).
+
+    파이프라인 내부용이다 — review_fetch_node가 여기에 논문 메타와 리뷰를 붙여
+    SelectedPaper로 만들고, Report에 실리는 것은 그쪽이다.
 
     1단계 검색은 제목·초록 임베딩만 보지만, 여기서는 입력 논문의 **PDF 원본**과
     후보 목록을 함께 넘겨 본문·실험·참고문헌까지 읽고 고르게 한다. 검색 상위 후보
@@ -489,13 +533,15 @@ class Report(BaseModel):
         default_factory=lambda: RetrievalConfidence())
     similar_papers: list[SimilarPaper] = Field(default_factory=list)
 
-    # --- 2단계 LLM 재정렬 결과 ---
-    selections: list[PaperSelection] = Field(
+    # --- 2단계 LLM 재정렬 결과 (화면의 주인공) ---
+    selected_papers: list[SelectedPaper] = Field(
         default_factory=list,
-        description="LLM이 검색 후보 중에서 고른 논문 (최대 5편). **화면에 보여줄 것은 "
-                    "이것이고 similar_papers는 후보 풀이다.** 비어 있을 수 있다 — "
+        description="LLM이 고른 논문과 그 논문이 받은 리뷰 (최대 5편). **화면에 보여줄 "
+                    "것은 이것이고 similar_papers는 후보 풀이다.** 비어 있을 수 있다 — "
                     "검색 신뢰도가 weak이면 재정렬을 돌리지 않고, 정말 비슷한 논문이 "
-                    "5편이 안 되면 모델이 더 적게 고른다(빈 목록도 정직한 답이다).")
+                    "5편이 안 되면 모델이 더 적게 고른다(빈 목록도 정직한 답이다). "
+                    "비었을 때 후보 풀을 대신 보여주면 안 된다 — 그게 이 단계를 넣은 "
+                    "이유를 무효로 만든다.")
 
     review_patterns: list[ReviewPattern] = Field(default_factory=list)
     venue_trends: list[VenueTrend] = Field(default_factory=list)

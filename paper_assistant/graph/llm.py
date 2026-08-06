@@ -61,6 +61,7 @@ class ClaudeLLM:
             messages=[{"role": "user", "content": user}],
             **params,
         )
+        self._log_usage(model, resp)
         if resp.stop_reason == "max_tokens":
             # 조용히 잘린 응답은 알아채기 어렵다. thinking이 켜져 있으면
             # max_tokens는 thinking+본문 합계 상한이라는 점을 특히 주의.
@@ -136,6 +137,9 @@ class ClaudeLLM:
     @staticmethod
     def _log_usage(model: str, resp) -> None:
         """토큰 사용량을 남긴다 — 비용이 추정이 아니라 실측으로 남게.
+
+        **모든 호출 경로가 이걸 통과해야 한다.** 한 곳이라도 빠지면 그 단계의 비용만
+        장부에서 사라지고, 합계가 맞지 않는 이유를 나중에 찾기 어렵다.
 
         cache_read_input_tokens가 계속 0이면 프리픽스가 매번 달라지고 있다는 뜻이라,
         캐싱을 전제로 짠 비용 계산이 틀어진다. 조용히 비싸지는 종류의 문제다.
