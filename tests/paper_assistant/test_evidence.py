@@ -1,151 +1,156 @@
-"""근거 풀 조립 + 인용 표기 검증 (RAG 근거 추적). DB/LLM 불필요."""
-from dataclasses import dataclass
+"""근거 풀 조립과 인용 검증 (DB·LLM 불필요).
 
+여기서 지키는 보장은 하나다: **화면에 남은 인용은 전부 실제 원문으로 역추적된다.**
+검증이 없으면 "인용해 달라"는 부탁일 뿐이고, 모델이 [E9]를 지어내도 화면에는 근거가
+달린 것처럼 보인다.
+
+⚠️ 보장의 범위는 라벨의 실재까지다. 실재하는 라벨을 엉뚱한 문장에 붙인 경우는
+잡히지 않는다 (evidence.py 모듈 주석 참고).
+"""
 from paper_assistant.graph.evidence import (
-    build_evidence, format_for_prompt, validate_citations)
-from paper_assistant.schemas import EvidenceItem, ReviewExample, ReviewPattern
+    MAX_META_REVIEWS, MAX_POINTS_PER_PAPER, MAX_TEXT, build_evidence_for_selected,
+    format_for_prompt, validate_citations)
+from paper_assistant.schemas import SelectedPaper
 
 
-@dataclass
-class FakePaper:
-    paper_id: int
-    title: str
-    decision: str = "reject"
-    meta_review: str | None = None
+def _paper(pid, title="논문", decision="reject", meta_review=None):
+    return SelectedPaper(
+        paper_id=pid, openreview_id=f"or{pid}", title=title, venue="ICLR 2025",
+        year=2025, decision=decision,
+        openreview_url=f"https://openreview.net/forum?id=or{pid}",
+        pdf_url=f"https://openreview.net/pdf?id=or{pid}",
+        rank=pid, reason="비슷함", confidence="high", meta_review=meta_review)
 
 
-def _pattern(aspect, texts, paper_ids=None, point_ids=None):
-    paper_ids = paper_ids or list(range(1, len(texts) + 1))
-    point_ids = point_ids or [100 + i for i in range(len(texts))]
-    return ReviewPattern(
-        label=aspect, aspect=aspect, paper_count=len(texts), total_papers=20,
-        examples=[ReviewExample(text=t, paper_id=pid, review_point_id=qid)
-                  for t, pid, qid in zip(texts, paper_ids, point_ids)])
+def _point(text, point_id=1, aspect="baselines", from_unsplit=False):
+    return {"point_id": point_id, "aspect": aspect, "text": text,
+            "from_unsplit": from_unsplit}
 
 
-def _evidence(*labels):
-    return [EvidenceItem(label=l, kind="review_point", text="t", paper_id=1)
-            for l in labels]
+# ------------------------------------------------------------- 근거 풀 조립
+
+def test_evidence_comes_from_the_selected_papers():
+    """근거는 **화면에 보이는 논문**에서 나와야 한다.
+
+    집계에서 뽑던 시절에는 화면에 없는 논문의 문장이 근거로 붙을 수 있었다.
+    """
+    papers = [_paper(1, "논문1"), _paper(2, "논문2")]
+    ev = build_evidence_for_selected(
+        papers, {1: [_point("QM9로만 평가했다", 101)],
+                 2: [_point("베이스라인이 약하다", 202)]})
+    assert [e.label for e in ev] == ["E1", "E2"]
+    assert {e.paper_id for e in ev} == {1, 2}
+    assert ev[0].review_point_id == 101
+    assert ev[0].paper_title == "논문1"
 
 
-# ------------------------------------------------------------ 근거 풀 조립
-
-def test_review_points_get_sequential_labels():
-    patterns = [_pattern("baselines", ["약점 A", "약점 B"]),
-                _pattern("novelty", ["약점 C"])]
-    ev = build_evidence(patterns, [FakePaper(1, "논문1"), FakePaper(2, "논문2")])
-    assert [e.label for e in ev] == ["E1", "E2", "E3"]
-    assert [e.kind for e in ev] == ["review_point"] * 3
+def test_points_are_capped_per_paper():
+    """한 논문이 근거 풀을 독점하면 나머지 논문의 지적이 프롬프트에서 사라진다."""
+    ev = build_evidence_for_selected(
+        [_paper(1)], {1: [_point(f"지적{i}", i) for i in range(10)]})
+    assert len(ev) == MAX_POINTS_PER_PAPER
 
 
-def test_evidence_keeps_source_ids_for_traceability():
-    """인용을 review_points.id까지 역추적할 수 있어야 근거 추적이 성립한다."""
-    patterns = [_pattern("baselines", ["QM9만으로 평가"], [7], [4242])]
-    ev = build_evidence(patterns, [FakePaper(7, "GNN 논문")])
-    assert ev[0].review_point_id == 4242
-    assert ev[0].paper_id == 7
-    assert ev[0].paper_title == "GNN 논문"
-    assert ev[0].aspect == "baselines"
-
-
-def test_meta_reviews_are_labelled_separately():
-    papers = [FakePaper(1, "논문1", "accept-poster", "AC 총평 하나"),
-              FakePaper(2, "논문2", "reject", "AC 총평 둘")]
-    ev = build_evidence([_pattern("baselines", ["약점"], [1])], papers)
-    labels = [e.label for e in ev]
-    assert labels == ["E1", "M1", "M2"]
-    meta = [e for e in ev if e.kind == "meta_review"]
-    assert meta[0].decision == "accept-poster"
-    assert meta[0].text == "AC 총평 하나"
-
-
-def test_papers_without_meta_review_are_skipped():
-    papers = [FakePaper(1, "논문1", meta_review=None),
-              FakePaper(2, "논문2", meta_review="   "),   # 공백만 있는 경우
-              FakePaper(3, "논문3", meta_review="진짜 총평")]
-    ev = build_evidence([], papers)
-    assert [e.label for e in ev] == ["M1"]
-    assert ev[0].paper_id == 3
-
-
-def test_pool_is_capped_so_the_prompt_stays_statistical():
-    """근거가 너무 많으면 모델이 통계를 무시하고 문장만 베낀다."""
-    patterns = [_pattern(f"aspect{i}", [f"약점{i}a", f"약점{i}b", f"약점{i}c"])
-                for i in range(8)]
-    papers = [FakePaper(i, f"논문{i}", meta_review=f"총평{i}") for i in range(1, 9)]
-    ev = build_evidence(patterns, papers)
-    points = [e for e in ev if e.kind == "review_point"]
+def test_meta_reviews_get_their_own_label_space():
+    """AC 총평은 개별 리뷰보다 신호가 강해 따로 인용할 수 있어야 한다."""
+    papers = [_paper(1, meta_review="AC: 실험이 부족하다는 데 동의"),
+              _paper(2, "논문2", "accept-poster", meta_review="AC: 통과")]
+    ev = build_evidence_for_selected(papers, {})
     metas = [e for e in ev if e.kind == "meta_review"]
-    assert len(points) == 5 * 2      # MAX_ASPECTS * MAX_POINTS_PER_ASPECT
-    assert len(metas) == 3           # MAX_META_REVIEWS
+    assert [m.label for m in metas] == ["M1", "M2"]
+    assert metas[1].decision == "accept-poster"
+
+
+def test_meta_reviews_are_capped():
+    papers = [_paper(i, meta_review=f"AC {i}") for i in range(1, 9)]
+    ev = build_evidence_for_selected(papers, {})
+    assert len([e for e in ev if e.kind == "meta_review"]) == MAX_META_REVIEWS
+
+
+def test_missing_meta_review_does_not_consume_a_label():
+    """총평이 없는 논문 때문에 M2가 건너뛰어지면 라벨이 어긋난다."""
+    papers = [_paper(1), _paper(2, meta_review="AC 총평")]
+    metas = [e for e in build_evidence_for_selected(papers, {})
+             if e.kind == "meta_review"]
+    assert [m.label for m in metas] == ["M1"]
+    assert metas[0].paper_id == 2
 
 
 def test_long_text_is_truncated():
-    patterns = [_pattern("baselines", ["가" * 5000])]
-    papers = [FakePaper(1, "논문1", meta_review="나" * 5000)]
-    ev = build_evidence(patterns, papers)
-    assert len(ev[0].text) == 400
-    assert len(ev[1].text) == 700
+    """프롬프트가 길어지면 모델이 요약 대신 문장만 베낀다."""
+    ev = build_evidence_for_selected([_paper(1)], {1: [_point("가" * 5000)]})
+    assert len(ev[0].text) == MAX_TEXT
 
 
-def test_format_for_prompt_leads_with_label():
-    ev = build_evidence([_pattern("baselines", ["약점"], [1])],
-                        [FakePaper(1, "논문1", "reject", "총평")])
+def test_unsplit_provenance_survives_into_the_pool():
+    """미분리 리뷰에서 나온 문장은 '지적'이라 단정할 수 없다 — 출처가 남아야 한다."""
+    ev = build_evidence_for_selected(
+        [_paper(1)], {1: [_point("본문 전체", from_unsplit=True)]})
+    assert ev[0].from_unsplit_review is True
+
+
+def test_no_points_and_no_meta_gives_an_empty_pool():
+    assert build_evidence_for_selected([_paper(1)], {}) == []
+
+
+def test_prompt_format_leads_with_the_label():
+    """모델이 참조할 키가 맨 앞에 있어야 한다."""
+    ev = build_evidence_for_selected(
+        [_paper(1, meta_review="AC")], {1: [_point("지적")]})
     out = format_for_prompt(ev)
     assert list(out[0])[0] == "label"
     assert out[0]["aspect"] == "baselines"
-    assert out[1]["decision"] == "reject"   # meta_review는 decision을 싣는다
+    assert out[1]["decision"] == "reject"
 
 
-# --------------------------------------------------------- 인용 표기 검증
+# -------------------------------------------------------------- 인용 검증
 
-def test_valid_citation_survives():
-    text, used = validate_citations("이 지적이 반복된다 [E1].", _evidence("E1", "E2"))
-    assert text == "이 지적이 반복된다 [E1]."
+def test_invented_labels_are_stripped():
+    """**핵심 보증.** 지어낸 라벨이 통과하면 검증은 부탁일 뿐이다."""
+    ev = build_evidence_for_selected([_paper(1)], {1: [_point("지적")]})
+    text, used = validate_citations("근거가 있다[E1]. 없는 것도 있다[E9].", ev)
+    assert "[E9]" not in text
     assert used == ["E1"]
 
 
-def test_invented_label_is_stripped():
-    """모델이 지어낸 라벨은 지운다 — 없으면 '인용해 달라'는 부탁일 뿐이다."""
-    text, used = validate_citations("근거 없는 주장 [E9].", _evidence("E1"))
-    assert "E9" not in text
+def test_a_block_of_only_invented_labels_disappears_entirely():
+    """대괄호만 남으면 화면에 빈 각주가 뜬다."""
+    ev = build_evidence_for_selected([_paper(1)], {1: [_point("지적")]})
+    text, used = validate_citations("근거 없는 문장이다[E7, E8].", ev)
+    assert "[" not in text
     assert used == []
 
 
-def test_partial_block_keeps_only_valid_labels():
-    text, used = validate_citations("혼합 [E1, E9, M1].", _evidence("E1", "M1"))
-    assert text == "혼합 [E1, M1]."
-    assert used == ["E1", "M1"]
+def test_mixed_block_keeps_only_the_real_labels():
+    ev = build_evidence_for_selected(
+        [_paper(1)], {1: [_point("가", 1), _point("나", 2)]})
+    text, used = validate_citations("문장이다[E1, E9, E2].", ev)
+    assert "[E1, E2]" in text
+    assert used == ["E1", "E2"]
 
 
-def test_multiple_citations_are_collected_in_order_without_duplicates():
-    _, used = validate_citations("A [M1]. B [E1]. C [E1] 또 [E2].",
-                                 _evidence("E1", "E2", "M1"))
-    assert used == ["M1", "E1", "E2"]
-
-
-def test_markdown_links_are_not_damaged():
-    """[텍스트](url) 형태를 인용으로 오인해 부수면 안 된다."""
-    src = "자세히는 [여기](https://openreview.net/forum?id=x)를 보라 [E1]."
-    text, used = validate_citations(src, _evidence("E1"))
-    assert "[여기](https://openreview.net/forum?id=x)" in text
+def test_duplicate_citations_are_recorded_once():
+    ev = build_evidence_for_selected([_paper(1)], {1: [_point("지적")]})
+    _, used = validate_citations("하나[E1]. 둘[E1].", ev)
     assert used == ["E1"]
 
 
-def test_empty_evidence_pool_strips_everything():
-    text, used = validate_citations("주장 [E1] 그리고 [M2].", [])
-    assert "E1" not in text and "M2" not in text
+def test_markdown_links_are_not_mangled():
+    """[텍스트](url)을 인용 표기로 오인하면 링크가 깨진다."""
+    ev = build_evidence_for_selected([_paper(1)], {1: [_point("지적")]})
+    text, _ = validate_citations("[OpenReview](https://openreview.net) 참고[E1].", ev)
+    assert "[OpenReview](https://openreview.net)" in text
+
+
+def test_empty_pool_strips_every_citation():
+    """근거가 없는데 인용이 남으면 검증된 것처럼 보인다."""
+    text, used = validate_citations("근거가 있는 척한다[E1].", [])
+    assert "[E1]" not in text
     assert used == []
 
 
-def test_text_without_citations_is_unchanged():
-    src = "## 유사 논문 20편\n- 이 주제 특유의 지적 없음"
-    text, used = validate_citations(src, _evidence("E1"))
-    assert text == src
+def test_text_without_citations_is_untouched():
+    ev = build_evidence_for_selected([_paper(1)], {1: [_point("지적")]})
+    text, used = validate_citations("인용이 없는 문장.", ev)
+    assert text == "인용이 없는 문장."
     assert used == []
-
-
-def test_newlines_survive_cleanup():
-    """공백 정리가 줄바꿈까지 먹으면 마크다운이 깨진다."""
-    text, _ = validate_citations("첫 줄 [E9]\n- 둘째 줄\n- 셋째 줄", _evidence("E1"))
-    assert text.count("\n") == 2

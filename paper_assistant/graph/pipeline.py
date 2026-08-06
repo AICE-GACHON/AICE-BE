@@ -1,12 +1,14 @@
 """LangGraph DAG 조립 + 공개 진입점.
 
-구조 (설계서 §2.2):
+구조 (docs/추천_파이프라인_재설계.md):
 
-    input → retrieval → ┬ similarity_tagging ┐
-                        ├ review_analysis    ┼→ synthesis → END
-                        └ venue_trend        ┘
+    input → retrieval → llm_rerank → review_fetch → synthesis → END
 
-검색 이후 3개 분석 노드는 병렬. synthesis는 셋 다 끝나야 실행된다.
+**완전 직렬이다.** 각 단계가 앞 단계의 결과를 입력으로 쓰기 때문이다 — 검색해야
+고를 수 있고, 골라야 그 논문의 리뷰를 읽을 수 있다. 병렬 분기가 있었던 것은
+통계 레이어(집계·학회경향·점수분포)가 검색 결과만 보고 서로 독립이었기 때문인데,
+그 층을 걷어내면서 함께 사라졌다.
+
 supervisor 없이 고정 DAG — 워크플로가 매번 동일하므로 LLM 라우팅이 불필요.
 """
 import functools
@@ -44,25 +46,13 @@ def build(embedder=None, use_llm: bool | None = None):
     g.add_node("retrieval", bind(nodes.retrieval_node))
     g.add_node("llm_rerank", bind(nodes.llm_rerank_node))
     g.add_node("review_fetch", bind(nodes.review_fetch_node))
-    g.add_node("similarity_tagging", bind(nodes.similarity_tagging_node))
-    g.add_node("review_analysis", bind(nodes.review_analysis_node))
-    g.add_node("venue_trend", bind(nodes.venue_trend_node))
     g.add_node("synthesis", bind(nodes.synthesis_node))
 
     g.add_edge(START, "input")
     g.add_edge("input", "retrieval")
-    # retrieval → 4개 병렬 분기. llm_rerank는 나머지 셋과 독립이라 같은 층에 둔다
-    # (셋 다 similar_papers만 읽고 서로의 결과를 쓰지 않는다).
     g.add_edge("retrieval", "llm_rerank")
     g.add_edge("llm_rerank", "review_fetch")   # 선정된 뒤에야 리뷰를 읽을 수 있다
-    g.add_edge("retrieval", "similarity_tagging")
-    g.add_edge("retrieval", "review_analysis")
-    g.add_edge("retrieval", "venue_trend")
-    # 넷 모두 완료 후 synthesis (fan-in)
     g.add_edge("review_fetch", "synthesis")
-    g.add_edge("similarity_tagging", "synthesis")
-    g.add_edge("review_analysis", "synthesis")
-    g.add_edge("venue_trend", "synthesis")
     g.add_edge("synthesis", END)
 
     return g.compile(), embedder

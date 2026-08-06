@@ -9,9 +9,7 @@ import pytest
 from paper_assistant.graph import nodes
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.retrieval.hybrid_search import SearchResult
-from paper_assistant.schemas import (
-    Report, ResubmissionFlow, ReviewExample, ReviewPattern, SelectedPaper,
-    VenueTrend)
+from paper_assistant.schemas import Report, SelectedPaper
 
 
 def _fake_paper(pid, title, decision="reject", cosine=0.95,
@@ -24,10 +22,6 @@ def _fake_paper(pid, title, decision="reject", cosine=0.95,
         meta_review=meta_review)
 
 
-def _example(text="이 논문은 QM9만으로 평가했다", paper_id=1, point_id=101):
-    return ReviewExample(text=text, paper_id=paper_id, review_point_id=point_id)
-
-
 def _selected(pid, title, decision="accept-poster", meta_review=None, reason="비슷함"):
     return SelectedPaper(
         paper_id=pid, openreview_id=f"or{pid}", title=title, venue="ICLR 2024",
@@ -37,13 +31,6 @@ def _selected(pid, title, decision="accept-poster", meta_review=None, reason="�
         rank=pid, reason=reason, confidence="high", meta_review=meta_review)
 
 
-def test_tagging_node_stub_returns_empty_tags_without_llm():
-    state: PipelineState = {"query_title": "Q", "query_abstract": "A",
-                            "similar_papers": [_fake_paper(1, "P1")]}
-    out = nodes.similarity_tagging_node(state, embedder=None, llm=None)
-    assert out["similarity_tags"] == {1: []}
-
-
 def test_synthesis_assembles_report_without_llm():
     state: PipelineState = {
         "query_title": "Graph nets",
@@ -51,14 +38,6 @@ def test_synthesis_assembles_report_without_llm():
         "similar_papers": [_fake_paper(1, "P1", "accept-poster"),
                            _fake_paper(2, "P2", "reject")],
         "selected_papers": [_selected(1, "P1"), _selected(2, "P2", "reject")],
-        "similarity_tags": {1: [], 2: []},
-        "review_patterns": [ReviewPattern(
-            label="weak baselines", aspect="baselines",
-            paper_count=2, total_papers=2, examples=[_example()])],
-        "venue_trends": [VenueTrend(venue="ICLR 2024", paper_count=2,
-                                    accept_count=1, accept_rate=0.5)],
-        "resubmission_flows": [ResubmissionFlow(
-            from_venue="ICLR 2024", to_venue="NeurIPS 2024", count=3)],
     }
     out = nodes.synthesis_node(state, embedder=None, llm=None)
     report = out["report"]
@@ -67,9 +46,6 @@ def test_synthesis_assembles_report_without_llm():
     assert report.similar_papers[0].rank == 1
     assert report.similar_papers[0].match_type == "both"
     assert report.confidence.level == "strong"     # cosine 0.95 → 도메인 안
-    assert report.review_patterns[0].aspect == "baselines"
-    assert report.resubmission_flows[0].from_venue == "ICLR 2024"
-    assert report.resubmission_flows[0].count == 3
     assert "비슷한 논문 2편" in report.summary_markdown
 
 
@@ -78,7 +54,6 @@ def test_report_is_json_serializable():
     state: PipelineState = {
         "query_title": "Q", "query_abstract": "A",
         "similar_papers": [_fake_paper(1, "P1")],
-        "similarity_tags": {1: []}, "review_patterns": [], "venue_trends": [],
     }
     report = nodes.synthesis_node(state, embedder=None, llm=None)["report"]
     dumped = report.model_dump_json()
@@ -93,8 +68,6 @@ def _synthesize(papers):
     state: PipelineState = {
         "query_title": "Q", "query_abstract": "A", "similar_papers": papers,
         "confidence": nodes.confidence_from(papers),
-        "similarity_tags": {p.paper_id: [] for p in papers},
-        "review_patterns": [], "venue_trends": [],
     }
     return nodes.synthesis_node(state, embedder=None, llm=None)["report"]
 
@@ -145,8 +118,10 @@ def test_graph_compiles_with_fake_embedder():
         dim = 768
     graph, _ = build(embedder=FakeEmbedder(), use_llm=False)
     node_names = set(graph.get_graph().nodes)
-    assert {"input", "retrieval", "llm_rerank", "similarity_tagging",
-            "review_analysis", "venue_trend", "synthesis"} <= node_names
+    assert node_names >= {"input", "retrieval", "llm_rerank", "review_fetch",
+                          "synthesis"}
+    # 통계 레이어의 노드는 사라졌다 — 남아 있으면 제거가 덜 된 것이다.
+    assert not node_names & {"similarity_tagging", "review_analysis", "venue_trend"}
 
 
 # ------------------------------------------------- 근거 추적 (RAG grounding)
@@ -170,8 +145,6 @@ def _grounded_state(meta_review=None):
                  "text": "QM9 하나로만 평가했다", "from_unsplit": False}],
             2: [],
         },
-        "similarity_tags": {1: [], 2: []},
-        "review_patterns": [], "venue_trends": [], "resubmission_flows": [],
     }
 
 
@@ -215,18 +188,6 @@ def test_no_citations_when_there_is_nothing_to_cite():
     assert report.evidence == []
     assert report.citations == []
     assert "[E" not in report.summary_markdown
-
-
-def test_evidence_falls_back_to_patterns_when_nothing_was_selected():
-    """재정렬을 못 돌린 경우(weak·LLM off·PDF 없음)에도 근거는 남긴다."""
-    state = _grounded_state()
-    state["selected_papers"] = []
-    state["review_patterns"] = [ReviewPattern(
-        label="베이스라인 비교 부족", aspect="baselines", paper_count=2,
-        total_papers=2, lift=1.6, is_distinctive=True,
-        examples=[_example("QM9 하나로만 평가했다", paper_id=1, point_id=501)])]
-    report = nodes.synthesis_node(state, embedder=None, llm=None)["report"]
-    assert [e.label for e in report.evidence] == ["E1"]
 
 
 def test_empty_selection_says_so_instead_of_showing_candidates():

@@ -1,9 +1,16 @@
-"""LangGraph 노드 7종.
+"""LangGraph 노드 5종.
 
-지능이 필요한 노드(재정렬·태깅·종합)만 LLM을 쓰고, 나머지는 코드로 처리한다.
-LLM이 None이면(예산 off) 결정론적 스텁을 만들어 DAG를 $0으로 검증할 수 있다.
+    input → retrieval → llm_rerank → review_fetch → synthesis
+
+LLM을 쓰는 것은 재정렬과 종합 둘뿐이다. LLM이 None이면(예산 off) 결정론적 스텁을
+만들어 DAG를 $0으로 검증할 수 있다.
 
 노드는 embedder / llm을 클로저로 주입받는다 (pipeline.build에서 바인딩).
+
+**통계 레이어(aspect 집계·lift·Fisher 당락대조·학회 경향·점수 분포)는 제거됐다.**
+이 서비스의 가치는 통계가 아니라 선정 5편의 리뷰 원문이고, 5편 위에서는 lift도
+Fisher도 통계적으로 무의미하다. 되살리려면 docs/추천_파이프라인_재설계.md 결정 #1을
+먼저 읽을 것 — 집계 코드(clustering.py)와 배치(scripts/build_*.py)는 남겨 뒀다.
 """
 import json
 import logging
@@ -11,25 +18,18 @@ import logging
 from paper_assistant.db.connection import cursor
 from paper_assistant.embedding.specter2 import (
     CONFIDENCE_MESSAGES, retrieval_confidence)
-from paper_assistant.graph.clustering import aggregate_by_aspect
 from paper_assistant.graph.evidence import (
-    build_evidence, build_evidence_for_selected, format_for_prompt,
+    MAX_POINTS_PER_PAPER, build_evidence_for_selected, format_for_prompt,
     validate_citations)
 from paper_assistant.graph.llm import (
-    HAIKU, RERANK_EFFORT, RERANK_MAX_TOKENS, SONNET, SONNET_EFFORT,
-    SONNET_MAX_TOKENS)
-from paper_assistant.graph.ratings import attach_paper_ratings, build_rating_context
+    RERANK_EFFORT, RERANK_MAX_TOKENS, SONNET, SONNET_EFFORT, SONNET_MAX_TOKENS)
 from paper_assistant.graph.state import PipelineState
-from paper_assistant.db.stats import (
-    conference_of, load_base_rates, load_venue_stats)
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
-    PaperSelection, Report, ResubmissionFlow, RetrievalConfidence, ReviewDetail,
-    ReviewPattern, SelectedPaper, SimilarityTag, SimilarPaper, VenueTrend)
+    PaperSelection, Report, RetrievalConfidence, ReviewDetail, SelectedPaper,
+    SimilarPaper)
 
 log = logging.getLogger(__name__)
-
-TAG_KINDS = ("methodology", "dataset", "problem_setting", "citation")
 
 
 # ---------------------------------------------------------------- input
@@ -222,7 +222,9 @@ def _validated_selections(raw: list, papers) -> list[PaperSelection]:
 
 
 # ------------------------------------------- 선정 논문의 리뷰 조회 (no LLM)
-MAX_POINTS_PER_PAPER = 3    # 근거 풀에 넣을 지적 문장 수 (논문당)
+# 읽는 개수는 **근거 풀이 실제로 쓰는 개수**와 같아야 한다. 더 읽으면 버려지고,
+# 덜 읽으면 근거 풀이 조용히 얇아진다. 같은 이름의 상수를 양쪽에 따로 두면
+# 값이 갈라지므로 evidence.py 하나가 소유한다.
 
 
 def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
@@ -303,215 +305,34 @@ def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
                                  for p in selected}}
 
 
-# ----------------------------------------------- similarity tagging (LLM)
-def similarity_tagging_node(state: PipelineState, embedder, llm) -> dict:
-    """상위 논문마다 '왜 유사한가' 태깅. LLM off면 스텁."""
-    papers = state.get("similar_papers", [])[:10]
-    tags: dict[int, list[SimilarityTag]] = {}
-
-    if llm is None:
-        # 스텁: 태그 없이 통과 (배선 검증용)
-        return {"similarity_tags": {p.paper_id: [] for p in papers}}
-
-    query = f"{state['query_title']}\n{state.get('query_abstract','')}"
-    system = (
-        "You compare a query paper to a candidate paper and explain why they are "
-        "similar. Return JSON: {\"tags\": [{\"kind\": one of "
-        "[methodology, dataset, problem_setting, citation], \"reason\": short}]}. "
-        "Only include tags that genuinely apply. Reasons under 15 words.")
-    for p in papers:
-        user = (f"QUERY:\n{query}\n\nCANDIDATE:\n{p.title}\n{p.abstract}")
-        out = llm.json(HAIKU, system, user, max_tokens=400)
-        parsed = []
-        for t in out.get("tags", []):
-            if t.get("kind") in TAG_KINDS and t.get("reason"):
-                parsed.append(SimilarityTag(kind=t["kind"], reason=t["reason"][:120]))
-        tags[p.paper_id] = parsed
-    return {"similarity_tags": tags}
-
-
-# ------------------------------------------------- review analysis (no LLM)
-def review_analysis_node(state: PipelineState, embedder, llm) -> dict:
-    """유사 논문들의 지적항목을 aspect별로 집계 (쿼리 시점, 임베딩 불필요).
-
-    SPECTER2 임베딩 클러스터링은 리뷰 문장에 부적합해(§14) aspect 기반 집계를 쓴다.
-    빈도가 아니라 **코퍼스 base rate 대비 lift**로 정렬하고, 이웃의 당락 정보를
-    함께 넘겨 "이 지적을 받고도 붙었는가"를 대조한다 (§18).
-    """
-    papers = state.get("similar_papers", [])
-    paper_ids = [p.paper_id for p in papers]
-    if not paper_ids:
-        return {"review_patterns": []}
-
-    with cursor() as cur:
-        # '측정 가능한' 이웃 = 모든 리뷰가 파싱된 논문. 강/약점 미분리 리뷰 중
-        # 약점 섹션을 못 살린 것이 하나라도 있으면 그 논문의 지적을 전부 봤다고
-        # 할 수 없어, 분모에 넣으면 '지적 안 받음'으로 잘못 세어진다.
-        # build_base_rates.py의 분모 정의와 반드시 같아야 lift가 성립한다.
-        cur.execute(
-            """
-            SELECT r.paper_id
-            FROM reviews r
-            LEFT JOIN (
-                SELECT DISTINCT review_id FROM review_points
-                WHERE sentiment = 'weakness'
-            ) x ON x.review_id = r.id
-            WHERE r.paper_id = ANY(%s)
-            GROUP BY r.paper_id
-            HAVING bool_and(NOT r.needs_llm_split OR x.review_id IS NOT NULL)
-            """,
-            (paper_ids,))
-        measurable = {r[0] for r in cur.fetchall()}
-        if not measurable:
-            return {"review_patterns": []}
-
-        # id를 같이 읽는다 — 요약이 인용한 문장을 review_points.id로 역추적한다.
-        # needs_llm_split도 읽는다: 미분리 리뷰의 항목은 본문 전체를 weakness로
-        # 라벨링한 것이라 요약·칭찬 문장이 섞여 있다. 집계 분모에는 그대로 쓰되
-        # (base rate 정의와 맞춰야 한다), 인용할 대표 문장으로는 뒤로 미룬다.
-        cur.execute(
-            """
-            SELECT p.id, p.paper_id, p.aspect, p.text, r.needs_llm_split
-            FROM review_points p JOIN reviews r ON r.id = p.review_id
-            WHERE p.paper_id = ANY(%s) AND p.sentiment = 'weakness'
-            """,
-            (sorted(measurable),))
-        points = [{"point_id": r[0], "paper_id": r[1], "aspect": r[2],
-                   "text": r[3], "from_unsplit": bool(r[4])}
-                  for r in cur.fetchall()]
-
-    patterns = aggregate_by_aspect(
-        points,
-        total_papers=len(measurable),
-        base_rates=load_base_rates(),
-        decisions={p.paper_id: p.decision for p in papers},
-        all_paper_ids=measurable,
-    )
-    return {"review_patterns": patterns}
-
-
-# --------------------------------------------------- venue trend (no LLM)
-def venue_trend_node(state: PipelineState, embedder, llm) -> dict:
-    """유사 논문들의 게재 결과 + 리뷰 점수를 SQL 집계.
-
-    accept율은 코퍼스 기준선과 함께 낸다 — NeurIPS는 코퍼스의 95%가 accept라
-    절대값이 실제 채택률처럼 읽히면 안 된다 (§19).
-    """
-    papers = state.get("similar_papers", [])
-    paper_ids = [p.paper_id for p in papers]
-    if not paper_ids:
-        return {"venue_trends": [], "paper_ratings": {}}
-
-    with cursor() as cur:
-        # 학회 단위(ICLR/NeurIPS)로 집계 — 연도별로 쪼개면 셀당 표본이 1~3편이라
-        # accept율이 통계적으로 무의미해진다(§14 실측). split_part로 연도를 떼고 합침.
-        cur.execute(
-            """
-            SELECT split_part(venue, ' ', 1) AS conf,
-                   count(*) AS n,
-                   count(*) FILTER (WHERE decision LIKE 'accept%%') AS accepts
-            FROM papers WHERE id = ANY(%s)
-            GROUP BY split_part(venue, ' ', 1) ORDER BY n DESC
-            """,
-            (paper_ids,))
-        trends = [VenueTrend(venue=r[0], paper_count=r[1], accept_count=r[2],
-                             accept_rate=round(r[2] / r[1], 3) if r[1] else 0.0)
-                  for r in cur.fetchall()]
-
-        # 논문별 리뷰 점수 (평균·개수·최고최저차). 168,217건 전부 rating 보유.
-        cur.execute(
-            """
-            SELECT paper_id, avg(rating), count(*), max(rating) - min(rating)
-            FROM reviews WHERE paper_id = ANY(%s) AND rating IS NOT NULL
-            GROUP BY paper_id
-            """,
-            (paper_ids,))
-        ratings = {r[0]: {"avg": float(r[1]), "count": r[2],
-                          "spread": float(r[3]) if r[3] is not None else None}
-                   for r in cur.fetchall()}
-
-        # 재투고 흐름: 유사 논문이 한쪽 끝인 링크를 venue쌍으로 집계
-        cur.execute(
-            """
-            SELECT e.venue AS from_v, l.venue AS to_v, count(*) AS n
-            FROM submission_links sl
-            JOIN papers e ON e.id = sl.earlier_paper_id
-            JOIN papers l ON l.id = sl.later_paper_id
-            WHERE sl.earlier_paper_id = ANY(%s) OR sl.later_paper_id = ANY(%s)
-            GROUP BY e.venue, l.venue ORDER BY n DESC
-            """,
-            (paper_ids, paper_ids))
-        flows = [ResubmissionFlow(from_venue=r[0], to_venue=r[1], count=r[2])
-                 for r in cur.fetchall()]
-
-    _attach_venue_baselines(trends)
-    return {"venue_trends": trends, "resubmission_flows": flows,
-            "paper_ratings": ratings}
-
-
-def _attach_venue_baselines(trends: list[VenueTrend]) -> None:
-    """학회 단위 accept율에 코퍼스 기준선과 편향 플래그를 붙인다.
-
-    trends는 학회 단위(ICLR/NeurIPS)인데 venue_stats는 venue×연도 단위라,
-    학회에 속한 연도들을 논문 수 가중으로 합쳐 기준선을 만든다.
-    """
-    stats = load_venue_stats()
-    if not stats:
-        return
-    for t in trends:
-        members = [s for v, s in stats.items() if conference_of(v) == t.venue]
-        if not members:
-            continue
-        total = sum(s.papers for s in members)
-        if not total:
-            continue
-        t.corpus_accept_rate = round(
-            sum(s.accept_rate * s.papers for s in members) / total, 3)
-        if t.corpus_accept_rate:
-            t.accept_lift = round(t.accept_rate / t.corpus_accept_rate, 2)
-        t.is_coverage_biased = any(s.is_coverage_biased for s in members)
 
 
 # ---------------------------------------------------- synthesis (LLM)
 def synthesis_node(state: PipelineState, embedder, llm) -> dict:
-    """세 분석을 종합해 Report 조립 + 마크다운 요약 생성."""
-    papers = state.get("similar_papers", [])
-    tags = state.get("similarity_tags", {})
-    patterns = state.get("review_patterns", [])
-    trends = state.get("venue_trends", [])
-
-    ratings = state.get("paper_ratings", {})
-    venue_stats = load_venue_stats()
-
-    similar = []
-    for i, p in enumerate(papers):
-        sp = SimilarPaper(
+    """선정 결과와 리뷰를 Report로 조립하고 마크다운 요약을 만든다."""
+    # 검색 후보. **화면에 보여줄 것이 아니라 근거 추적용 기록이다** — 무엇을 보고
+    # 무엇을 골랐는지 되짚을 수 있어야 재정렬의 품질을 나중에 잴 수 있다.
+    similar = [
+        SimilarPaper(
             paper_id=p.paper_id, openreview_id=p.openreview_id, title=p.title,
             venue=p.venue, year=p.year, decision=p.decision,
-            rank=i + 1, match_type=p.match_type, tags=tags.get(p.paper_id, []))
-        attach_paper_ratings(sp, venue_stats.get(p.venue), ratings.get(p.paper_id))
-        similar.append(sp)
-
-    rating_context = build_rating_context(papers, ratings, venue_stats)
+            rank=i + 1, match_type=p.match_type)
+        for i, p in enumerate(state.get("similar_papers", []))
+    ]
 
     # 신뢰도는 retrieval_node가 이미 판정해 state에 넣어 뒀다 (재정렬이 그 값을
     # 보고 돌릴지 정해야 해서 검색 단계로 옮겼다). 여기서 다시 계산하면 두 곳이
     # 갈라질 수 있다.
     confidence = state.get("confidence") or RetrievalConfidence()
 
-    # 근거 풀은 **선정 5편의 리뷰 원문**에서 만든다. 집계에서 뽑으면 화면에 없는
-    # 논문의 문장이 근거로 붙는다. LLM을 끄더라도 채운다 — 근거 목록은 생성 결과가
-    # 아니라 조회 결과다.
+    # 근거 풀은 **선정 5편의 리뷰 원문**에서 만든다. LLM을 끄더라도 채운다 —
+    # 근거 목록은 생성 결과가 아니라 조회 결과다. 고른 논문이 없으면 근거도 없다:
+    # 후보의 리뷰를 대신 채우면 화면에 없는 논문의 문장이 근거로 붙는다.
     selected = state.get("selected_papers", [])
-    if selected:
-        evidence_pool = build_evidence_for_selected(
-            selected, state.get("selection_points", {}))
-    else:
-        # 재정렬을 못 돌린 경우(weak·LLM off·PDF 없음)에도 근거는 남긴다.
-        evidence_pool = build_evidence(patterns, papers)
+    evidence_pool = build_evidence_for_selected(
+        selected, state.get("selection_points", {})) if selected else []
 
-    summary, citations = _summary(state, selected, patterns, trends,
-                                  rating_context, confidence, evidence_pool, llm)
+    summary, citations = _summary(state, selected, confidence, evidence_pool, llm)
 
     report = Report(
         query_title=state["query_title"],
@@ -519,10 +340,6 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         confidence=confidence,
         similar_papers=similar,
         selected_papers=selected,
-        review_patterns=patterns,
-        venue_trends=trends,
-        rating_context=rating_context,
-        resubmission_flows=state.get("resubmission_flows", []),
         evidence=evidence_pool,
         citations=citations,
         summary_markdown=summary,
@@ -530,48 +347,8 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
     return {"report": report}
 
 
-def _risky_first(patterns, significant_only: bool = True):
-    """당락 격차가 큰 지적 순. accept율 차이가 곧 '치명도'다.
-
-    기본은 Fisher 검정을 통과한 것만 — 이웃 20편에서 "4편 중 0편 통과" 같은
-    표본은 그럴듯해 보이지만 우연이다 (§18).
-    """
-    scored = [(p, p.accept_rate_without - p.accept_rate_with)
-              for p in patterns
-              if p.accept_rate_with is not None and p.accept_rate_without is not None
-              and (p.is_contrast_significant or not significant_only)]
-    return sorted(scored, key=lambda kv: kv[1], reverse=True)
-
-
-def _rating_lines(rc) -> list[str]:
-    """rating 맥락을 사람이 읽는 줄로. 편향 venue는 반드시 경고를 단다."""
-    if not rc or not rc.rated_papers:
-        return []
-    lines = [f"- 이웃 평균 점수 {rc.neighbor_mean} ({rc.rated_papers}편)"]
-    if rc.accepted_mean is not None and rc.rejected_mean is not None:
-        lines[-1] += f" — 통과 {rc.accepted_mean} vs 탈락 {rc.rejected_mean}"
-    if rc.threshold is not None:
-        lines.append(f"- 당락 경계: {rc.threshold_venue} 기준 평균 "
-                     f"{rc.threshold} 이상이면 통과율 50% 초과")
-    if rc.split_papers:
-        lines.append(f"- 리뷰어 의견이 갈린 논문 {len(rc.split_papers)}편: "
-                     f"{rc.split_papers[0][:50]}")
-    if rc.biased_venues:
-        lines.append(f"- ⚠️ {', '.join(rc.biased_venues)}는 채택 논문 위주로만 "
-                     f"공개되어 accept율을 실제 채택률로 읽으면 안 됨")
-    return lines
-
-
-def _first_label(evidence_pool, aspect: str) -> str:
-    """해당 aspect의 첫 근거 라벨. 없으면 빈 문자열 (스텁 요약이 인용할 때 쓴다)."""
-    for e in evidence_pool:
-        if e.aspect == aspect:
-            return f" [{e.label}]"
-    return ""
-
-
-def _summary(state, selected, patterns, trends, rating_context, confidence,
-             evidence_pool, llm) -> tuple[str, list[str]]:
+def _summary(state, selected, confidence, evidence_pool, llm
+             ) -> tuple[str, list[str]]:
     """(요약 마크다운, 실제로 인용된 근거 라벨) 반환.
 
     **주어는 항상 유사 논문이다.** "당신은 X를 지적받을 것입니다"가 아니라 "비슷한
