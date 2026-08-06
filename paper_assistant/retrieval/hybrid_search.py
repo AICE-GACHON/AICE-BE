@@ -301,22 +301,28 @@ def rerank(rrf_scores: dict[int, float],
     return signals
 
 
-def _fetch_ranking_fields(cur, paper_ids: list[int]
-                          ) -> tuple[dict[int, tuple[int, float | None]], int]:
-    """재정렬에 필요한 최소 컬럼만 + 코퍼스 최신 연도.
+def _fetch_ranking_fields(cur, paper_ids: list[int]) -> tuple[
+        dict[int, tuple[int, float | None]], dict[int, tuple], int]:
+    """재정렬에 필요한 최소 컬럼 + 중복 판별 키 + 코퍼스 최신 연도.
 
-    전체 메타데이터(초록·AC 총평)를 후보 300편분 가져오면 낭비라, 재정렬용
+    전체 메타데이터(초록·AC 총평)를 후보 전부에 대해 가져오면 낭비라, 재정렬용
     컬럼만 먼저 읽고 상위 top_k가 정해진 뒤에 나머지를 가져온다.
 
     max(year)는 스칼라 서브쿼리라 한 번만 평가된다. 43,515행 집계가 매 쿼리
     붙지만 HNSW 검색·임베딩에 비하면 무시할 수준이라 캐시하지 않았다 — 캐시하면
     코퍼스에 새 연도가 들어와도 프로세스가 살아 있는 동안 반영되지 않는다.
+
+    반환값 둘째는 `{paper_id: (정규화 제목, venue, 리뷰 수)}` — 중복 제거용이다
+    (_dedupe_key 참고). 리뷰 수는 쌍 중 어느 쪽을 남길지 정하는 데 쓴다.
     """
     if not paper_ids:
-        return {}, 0
+        return {}, {}, 0
     cur.execute(
         """
-        SELECT p.id, p.year, p.citation_percentile, m.max_year
+        SELECT p.id, p.year, p.citation_percentile,
+               lower(btrim(p.title)), p.venue,
+               (SELECT count(*) FROM reviews r WHERE r.paper_id = p.id),
+               m.max_year
         FROM papers p, (SELECT max(year) AS max_year FROM papers) m
         WHERE p.id = ANY(%s)
         """,
@@ -324,9 +330,49 @@ def _fetch_ranking_fields(cur, paper_ids: list[int]
     )
     rows = cur.fetchall()
     if not rows:
-        return {}, 0
-    fields = {row[0]: (row[1], row[2]) for row in rows}
-    return fields, rows[0][3]
+        return {}, {}, 0
+    fields = {r[0]: (r[1], r[2]) for r in rows}
+    dedupe = {r[0]: (r[3], r[4], r[5]) for r in rows}
+    return fields, dedupe, rows[0][6]
+
+
+def _pick_without_duplicates(ranked, dedupe: dict[int, tuple], top_k: int):
+    """같은 논문이 후보에 두 번 들어가지 않게 하면서 상위 top_k를 고른다.
+
+    **코퍼스에 같은 논문이 두 행으로 들어 있다** — NeurIPS 2021에서 301쌍(그 venue의
+    21.7%)이다. openreview_id도 forum_id도 다른 별개의 노트라 `paper_id` 기준
+    중복 제거로는 걸리지 않는다. 실측: 표본 8쌍 중 6쌍이 후보 50편에 나란히 들어왔다.
+
+    막지 않으면 두 가지가 깨진다. 후보 한 자리가 낭비되고, LLM이 둘 다 고르면
+    **사용자에게 같은 논문이 두 번 뜬다** (paper_id가 달라 선정 단계의 중복 제거도
+    통과한다).
+
+    ⚠️ **DB에서 지우지 않는 이유**: 두 행의 리뷰가 **하나도 겹치지 않는다**(301쌍 전부,
+    쌍당 평균 7.8건). 한쪽을 지우면 실제 리뷰 약 1,170건이 사라진다. 어느 쪽이
+    정본인지도 판별되지 않는다 — decision은 301쌍 전부 일치하고, 리뷰 수·평균 평점은
+    양방향으로 고르게 갈린다. 그래서 저장은 그대로 두고 **검색에서만** 하나로 접는다.
+
+    남길 쪽은 **리뷰가 많은 행**이다. 어차피 한 쪽만 보여준다면 읽을 것이 많은 편이
+    낫다. 같으면 순위가 높은 쪽이 남는다.
+
+    venue를 키에 넣는 이유: ICLR 2024 → NeurIPS 2024 재투고는 **같은 제목이지만 다른
+    심사**다. 그건 접으면 안 된다 (submission_links가 추적하는 관계다).
+    """
+    best: dict[tuple, tuple[int, object]] = {}   # 키 -> (paper_id, signal)
+    order: list[tuple] = []                      # 키의 첫 등장 순서 = 순위
+    for pid, signal in ranked:
+        key = dedupe.get(pid)
+        if key is None:                # 조회 사이에 사라진 논문
+            key = ("__missing__", pid, 0)
+        lookup = key[:2]
+        if lookup not in best:
+            best[lookup] = (pid, signal)
+            order.append(lookup)
+            if len(order) == top_k:
+                break
+        elif key[2] > dedupe.get(best[lookup][0], (None, None, -1))[2]:
+            best[lookup] = (pid, signal)   # 리뷰가 더 많은 쪽으로 교체
+    return [best[k] for k in order]
 
 
 def _fetch_metadata(cur, paper_ids: list[int]) -> dict[int, tuple]:
@@ -380,11 +426,14 @@ def hybrid_search(embedding, query_text: str, top_k: int | None = None,
 
         # 재정렬은 후보 **전체**를 대상으로 해야 의미가 있다. top_k로 자른 뒤에
         # 재정렬하면 최신 논문이 잘려나간 뒤라 끌어올릴 대상 자체가 없다.
-        ranking_fields, max_year = _fetch_ranking_fields(cur, list(scores))
+        ranking_fields, dedupe, max_year = _fetch_ranking_fields(cur, list(scores))
         signals = rerank(scores, ranking_fields, max_year)
 
-        ranked = sorted(signals.items(), key=lambda kv: kv[1].final,
-                        reverse=True)[:top_k]
+        # 자르기 **전에** 중복을 접는다. 자른 뒤에 접으면 사라진 자리만큼 후보가
+        # 줄어들어, 요청한 50편이 아니라 48편이 조용히 나간다.
+        ranked = _pick_without_duplicates(
+            sorted(signals.items(), key=lambda kv: kv[1].final, reverse=True),
+            dedupe, top_k)
         meta = _fetch_metadata(cur, [pid for pid, _ in ranked])
 
     results = []

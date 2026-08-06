@@ -233,3 +233,70 @@ def test_similarity_is_normalized_to_unit_range():
 def test_weighted_score_is_bounded_by_zero_and_one():
     assert weighted_score(0.0, 0.0, 0.0) == pytest.approx(0.0)
     assert weighted_score(1.0, 1.0, 1.0) == pytest.approx(1.0)
+
+
+# ------------------------------------------------ 코퍼스 중복 접기
+#
+# 코퍼스에 같은 논문이 두 행으로 들어 있다 (NeurIPS 2021 301쌍). openreview_id도
+# forum_id도 다른 별개의 노트라 paper_id 기준 중복 제거로는 안 걸리고, 실측에서
+# 표본 8쌍 중 6쌍이 후보 50편에 나란히 들어왔다.
+
+def _sig(final):
+    from paper_assistant.retrieval.hybrid_search import RankingSignals
+    return RankingSignals(final=final, similarity=final, recency=1.0, citation=0.5)
+
+
+def test_duplicate_papers_are_folded_into_one():
+    """같은 (제목, venue)가 후보에 두 번 들어가면 자리가 낭비되고, LLM이 둘 다 고르면
+    사용자에게 같은 논문이 두 번 뜬다 (paper_id가 달라 선정 단계 중복 제거도 통과)."""
+    ranked = [(1, _sig(0.9)), (2, _sig(0.8)), (3, _sig(0.7))]
+    dedupe = {1: ("같은 논문", "NeurIPS 2021", 3),
+              2: ("같은 논문", "NeurIPS 2021", 7),
+              3: ("다른 논문", "NeurIPS 2021", 4)}
+    out = hybrid_search._pick_without_duplicates(ranked, dedupe, top_k=10)
+    assert [pid for pid, _ in out] == [2, 3], "중복이 접히지 않았다"
+
+
+def test_the_twin_with_more_reviews_wins():
+    """어차피 한 쪽만 보여준다면 읽을 것이 많은 편이 낫다.
+
+    두 행의 리뷰는 **하나도 겹치지 않으므로**(301쌍 전부) 어느 쪽을 고르냐가 곧
+    사용자가 볼 리뷰 수다.
+    """
+    ranked = [(1, _sig(0.9)), (2, _sig(0.8))]
+    dedupe = {1: ("t", "NeurIPS 2021", 3), 2: ("t", "NeurIPS 2021", 7)}
+    assert [pid for pid, _ in
+            hybrid_search._pick_without_duplicates(ranked, dedupe, 10)] == [2]
+
+
+def test_folding_keeps_the_higher_rank_position():
+    """리뷰가 많은 쪽으로 바꾸더라도 **자리는 높은 순위 자리**여야 한다."""
+    ranked = [(1, _sig(0.9)), (9, _sig(0.85)), (2, _sig(0.8))]
+    dedupe = {1: ("t", "N 2021", 3), 2: ("t", "N 2021", 7), 9: ("u", "N 2021", 1)}
+    assert [pid for pid, _ in
+            hybrid_search._pick_without_duplicates(ranked, dedupe, 10)] == [2, 9]
+
+
+def test_same_title_at_different_venues_is_not_folded():
+    """ICLR 2024 → NeurIPS 2024 재투고는 같은 제목이지만 **다른 심사**다.
+
+    접어 버리면 "이 논문은 떨어졌다가 고쳐서 붙었다"를 보여줄 수 없게 된다
+    (submission_links가 추적하는 바로 그 관계다).
+    """
+    ranked = [(1, _sig(0.9)), (2, _sig(0.8))]
+    dedupe = {1: ("t", "ICLR 2024", 4), 2: ("t", "NeurIPS 2024", 4)}
+    assert len(hybrid_search._pick_without_duplicates(ranked, dedupe, 10)) == 2
+
+
+def test_folding_happens_before_slicing_not_after():
+    """자른 뒤에 접으면 요청한 개수보다 적게 나간다 — 조용히 후보가 줄어든다."""
+    ranked = [(1, _sig(0.9)), (2, _sig(0.8)), (3, _sig(0.7))]
+    dedupe = {1: ("a", "v", 1), 2: ("a", "v", 9), 3: ("b", "v", 1)}
+    out = hybrid_search._pick_without_duplicates(ranked, dedupe, top_k=2)
+    assert len(out) == 2, "중복을 접고도 요청한 2편을 채워야 한다"
+
+
+def test_papers_missing_from_metadata_are_not_folded_together():
+    """조회 사이에 사라진 논문들이 같은 키로 묶여 서로를 지우면 안 된다."""
+    ranked = [(1, _sig(0.9)), (2, _sig(0.8))]
+    assert len(hybrid_search._pick_without_duplicates(ranked, {}, 10)) == 2
