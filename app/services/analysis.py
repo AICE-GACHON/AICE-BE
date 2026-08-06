@@ -54,7 +54,11 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
             # 실제로 LLM을 썼는지는 아래에서 report.used_llm으로 확인한다.
             from paper_assistant import analyze
 
-            report = analyze(title=submission.title, abstract=submission.abstract)
+            # PDF 원본을 함께 넘긴다. 1단계 검색은 제목·초록만 쓰지만 2단계 LLM
+            # 재정렬이 본문·참고문헌을 봐야 하기 때문이다. 개편 이전에 만들어진
+            # 초안은 pdf_bytes가 None이라 제목·초록만으로 돌아간다.
+            report = analyze(title=submission.title, abstract=submission.abstract,
+                             pdf_bytes=submission.pdf_bytes)
         except Exception as exc:
             # 분석 실패는 서버 장애가 아니라 이 작업의 상태다. 사용자가 폴링으로
             # 확인할 수 있도록 failed로 기록하고 예외를 삼킨다.
@@ -72,12 +76,18 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
         prediction.completed_at = _now()
 
         # 근거 추적: 이 분석이 어떤 논문을 보고 나왔는지 역방향 조회용으로 남긴다.
+        #
+        # ⚠️ selected/llm_rank는 아직 검색 순위를 그대로 옮겨 적는다. LLM 재정렬
+        # 노드가 들어오면(개편 3단계) 이 자리에서 실제 선정 결과를 받아 쓰게 된다.
+        # 그때까지는 "리포트에 실린 논문 = 선정된 논문"이라 의미가 어긋나지 않는다.
         for paper in report.similar_papers:
             db.add(SimilarPaperMatch(
                 prediction_id=prediction.prediction_id,
                 paper_id=paper.paper_id,
                 rank=paper.rank,
                 match_type=paper.match_type,
+                selected=True,
+                llm_rank=paper.rank,
             ))
         db.commit()
         log.info("분석 완료 prediction_id=%s 유사논문=%d 신뢰도=%s",

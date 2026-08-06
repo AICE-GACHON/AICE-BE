@@ -188,9 +188,12 @@ def test_submission_ownership_returns_404_for_other_user(cleanup_users):
     cleanup_users.append(other["email"])
     other_tokens = _login(other["email"], other["password"]).json()["data"]
 
+    from tests.app.conftest import make_pdf
+
     create_resp = client.post(
-        "/api/submissions",
-        json={"title": "Test Paper", "abstract": "abstract text"},
+        "/api/submissions/pdf",
+        data={"title": "Test Paper", "abstract": "abstract text"},
+        files={"pdf": ("paper.pdf", make_pdf(), "application/pdf")},
         headers={"Authorization": f"Bearer {owner_tokens['access_token']}"},
     )
     assert create_resp.status_code == 201, create_resp.text

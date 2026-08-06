@@ -122,5 +122,59 @@ def other_user(signup):
     return signup()
 
 
+# ------------------------------------------------------------------ PDF 헬퍼
+
+def make_pdf(title: str = "Graph Neural Networks for Molecules",
+             abstract: str = "We propose a message-passing GNN for molecules.",
+             pages: int = 1) -> bytes:
+    """추출기가 실제로 읽어낼 수 있는 최소 논문 PDF를 만든다.
+
+    바이트를 하드코딩하지 않고 매번 조립하는 이유는 **페이지 수를 파라미터로 받아야**
+    하기 때문이다 — 페이지 상한(60p) 검사에는 진짜 다중 페이지 PDF가 필요하다.
+
+    조판은 pdf/extract.py가 기대하는 형태를 맞춘다: 제목이 첫 페이지에서 가장 큰
+    폰트(17pt), 저자는 작게(10pt, 폰트 크기로 걸러진다), 초록은 'Abstract'와
+    'Introduction' 사이. 초록은 **한 줄에 들어가는 길이로 유지할 것** — 직접 줄을
+    나누면 단어가 쪼개져 검증이 지저분해진다.
+    """
+    import fitz  # PyMuPDF
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), title, fontsize=17)
+    page.insert_text((72, 130), "Jane Doe, John Roe", fontsize=10)
+    page.insert_text((72, 170), "Abstract", fontsize=12)
+    page.insert_text((72, 190), abstract, fontsize=10)
+    page.insert_text((72, 230), "1 Introduction", fontsize=12)
+    for _ in range(pages - 1):
+        doc.new_page().insert_text((72, 100), "body text", fontsize=10)
+    try:
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def upload_pdf(client, auth, *, title: str | None = "Graph Neural Networks for Molecules",
+               abstract: str | None = "We propose a message-passing GNN for molecules.",
+               field: str | None = "ML", pages: int = 1, pdf: bytes | None = None,
+               filename: str = "paper.pdf"):
+    """POST /api/submissions/pdf 원본 응답. 실패 사례도 봐야 하므로 검증하지 않는다.
+
+    title/abstract를 None으로 주면 폼에서 빼서 **서버가 PDF에서 추출하게** 한다.
+    """
+    data = {}
+    if title is not None:
+        data["title"] = title
+    if abstract is not None:
+        data["abstract"] = abstract
+    if field is not None:
+        data["field"] = field
+    body = pdf if pdf is not None else make_pdf(pages=pages)
+    return client.post(
+        "/api/submissions/pdf", data=data,
+        files={"pdf": (filename, body, "application/pdf")},
+        headers=auth["headers"])
+
+
 # Base는 여기서 쓰지 않지만, 모델이 등록된 상태인지 확인하는 안전장치.
 assert SERVICE_TABLES <= set(Base.metadata.tables)

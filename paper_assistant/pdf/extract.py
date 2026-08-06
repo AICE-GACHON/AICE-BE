@@ -29,6 +29,22 @@ MIN_TITLE_CHARS = 8
 MAX_TITLE_CHARS = 250
 
 
+def page_count(pdf_bytes: bytes) -> int:
+    """PDF 페이지 수. 손상된 PDF면 예외가 그대로 올라간다.
+
+    제목·초록 추출과 분리해 둔 이유는 **호출 순서** 때문이다. 페이지 수 상한을 넘는
+    문서는 추출을 시도하기 전에 거부해야 한다 — 200페이지짜리를 파싱한 뒤에 거부하면
+    그 비용이 그냥 버려진다. 이쪽은 페이지를 읽지 않고 목차만 보므로 훨씬 싸다.
+    """
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return doc.page_count
+    finally:
+        doc.close()
+
+
 def _page_spans(pdf_bytes: bytes, pages: int = 2):
     """(size, text, page_index) 리스트 + 전체 텍스트 반환."""
     import fitz  # PyMuPDF

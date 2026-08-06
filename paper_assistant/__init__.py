@@ -32,6 +32,7 @@ __all__ = [
     "get_paper_story",
     "list_papers",
     "extract_pdf_title_abstract",
+    "pdf_page_count",
 ]
 
 
@@ -78,6 +79,16 @@ def extract_pdf_title_abstract(*args, **kwargs):
     """
     from paper_assistant.pdf.extract import extract_title_abstract as _extract
     return _extract(*args, **kwargs)
+
+
+def pdf_page_count(pdf_bytes: bytes) -> int:
+    """PDF 페이지 수. 페이지 수 상한 검사를 **추출 전에** 하기 위한 것이다.
+
+    extract_pdf_title_abstract()보다 훨씬 싸므로, 거부할 문서에 파싱 비용을 쓰지
+    않으려면 이걸 먼저 부를 것.
+    """
+    from paper_assistant.pdf.extract import page_count as _fn
+    return _fn(pdf_bytes)
 
 
 def get_paper_revisions(paper_id: int) -> "PaperRevisions | None":

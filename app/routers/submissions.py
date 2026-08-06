@@ -21,9 +21,9 @@ from app.models.user import User
 from app.schemas.analysis import AnalysisResponse, AnalysisStartResponse
 from app.schemas.common import ApiResponse
 from app.schemas.submission import (
-    SimilarPaperMatchResponse, SubmissionCreate, SubmissionResponse, SubmissionSummary)
+    SimilarPaperMatchResponse, SubmissionResponse, SubmissionSummary)
 from app.services.analysis import run_analysis
-from paper_assistant import extract_pdf_title_abstract
+from paper_assistant import extract_pdf_title_abstract, pdf_page_count
 
 log = logging.getLogger(__name__)
 
@@ -34,13 +34,25 @@ router = APIRouter(prefix="/api/submissions", tags=["submissions"])
 # 남는다 — 정리하지 않으면 그 초안은 두 번 다시 분석할 수 없다.
 STALE_AFTER = timedelta(minutes=15)
 
-_PDF_EXTRACT_ERROR = "PDF에서 텍스트를 추출할 수 없습니다."
-# JSON 경로(SubmissionCreate)는 Pydantic Field(max_length=...)로 걸러지지만, 이
-# 엔드포인트는 Form 파라미터라 그 검증을 안 타서 DB 컬럼 길이(String(300)/String(100))를
-# 넘기면 500이 난다. 여기서 미리 걸러 422로 통일한다.
+_PDF_EXTRACT_ERROR = (
+    "PDF에서 제목과 초록을 추출할 수 없습니다. 스캔본이거나 텍스트 레이어가 없는 "
+    "PDF일 수 있습니다.")
+# Form 파라미터는 Pydantic Field(max_length=...) 검증을 안 타서 DB 컬럼 길이
+# (String(300)/String(100))를 넘기면 500이 난다. 여기서 미리 걸러 422로 통일한다.
 _MAX_TITLE_LEN = 300
 _MAX_FIELD_LEN = 100
 _MAX_PDF_BYTES = 20 * 1024 * 1024  # 20MB — 논문 PDF치고 넉넉한 상한. 메모리에 통째로 읽으므로 무제한은 위험하다.
+
+# 페이지 상한이 둘인 이유: 경고와 거부는 다른 일이다.
+#
+# LLM 재정렬은 PDF를 통째로 넘기고 페이지당 약 2,970토큰이 든다. 60p면 분석 1회에
+# 약 $0.36이라, 그 위는 논문이 아닐 개연성이 훨씬 높다고 보고 거부한다.
+#
+# WARN(15p)은 **서버가 강제하지 않는다.** page_count를 응답에 실어 보내면 프론트가
+# "논문 PDF가 맞는지 확인해 주세요"를 띄우고, 사용자가 확인하면 그대로 진행한다.
+# 경고는 UX이고 거부는 안전장치라, 한 곳에서 처리하려 하면 둘 다 어정쩡해진다.
+_WARN_PAGE_COUNT = 15
+_MAX_PAGE_COUNT = 60
 
 
 def _now() -> datetime:
@@ -86,21 +98,6 @@ def _expire_stale(db: Session, submission_id: uuid.UUID) -> None:
 
 # ------------------------------------------------------------------ 초안 CRUD
 
-@router.post("", response_model=ApiResponse[SubmissionResponse],
-             status_code=status.HTTP_201_CREATED)
-def create_submission(
-    payload: SubmissionCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    submission = Submission(user_id=current_user.user_id, **payload.model_dump())
-    db.add(submission)
-    db.commit()
-    db.refresh(submission)
-    return ApiResponse[SubmissionResponse](
-        data=SubmissionResponse.model_validate(submission))
-
-
 @router.post(
     "/pdf", response_model=ApiResponse[SubmissionResponse], status_code=status.HTTP_201_CREATED)
 async def create_submission_from_pdf(
@@ -111,13 +108,22 @@ async def create_submission_from_pdf(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """PDF로 초안을 올린다. title/abstract가 비어 있으면 PDF에서 추출한다
-    (paper_assistant.extract_pdf_title_abstract — analyze(pdf_bytes=...)가 내부에서
-    쓰는 것과 같은 추출기).
+    """내 논문을 PDF로 올린다. **유일한 입력 경로다.**
+
+    텍스트 붙여넣기 경로는 없다. 2단계 LLM 재정렬이 입력 논문의 본문과 참고문헌까지
+    봐야 하는데, 제목·초록만으로는 그걸 줄 수 없기 때문이다 — 텍스트 입력을 허용하면
+    같은 API가 전혀 다른 품질의 결과를 내면서 그 사실이 드러나지 않는다.
+
+    title/abstract를 비워 보내면 PDF에서 추출한다. 사용자가 직접 채워 보내면 그 값이
+    우선한다(추출이 어긋났을 때의 교정 경로).
+
+    ⚠️ **추출에 실패하면 422로 거부한다.** 스캔본이나 옛 조판 PDF는 어떤 추출기로도
+    복원이 어렵고(pdf/extract.py 주석), 제목·초록이 없으면 1단계 임베딩 자체가
+    불가능하다. 사용자가 고칠 기회를 주기보다 명확히 거부하는 쪽을 택했다.
     """
     is_pdf = pdf.content_type == "application/pdf" or (pdf.filename or "").lower().endswith(".pdf")
     if not is_pdf:
-        raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
+        raise HTTPException(status_code=422, detail="PDF 파일만 업로드할 수 있습니다.")
 
     if len(title) > _MAX_TITLE_LEN or (field is not None and len(field) > _MAX_FIELD_LEN):
         raise HTTPException(status_code=422, detail="title/field 길이가 너무 깁니다.")
@@ -125,6 +131,20 @@ async def create_submission_from_pdf(
     pdf_bytes = await pdf.read()
     if len(pdf_bytes) > _MAX_PDF_BYTES:
         raise HTTPException(status_code=422, detail="PDF 용량이 너무 큽니다 (20MB 초과).")
+
+    # 페이지 수를 **추출보다 먼저** 본다 — 거부할 문서에 파싱 비용을 쓰지 않는다.
+    # 여기서 PDF가 열리지 않으면 손상된 파일이므로 추출도 어차피 실패한다.
+    try:
+        pages = pdf_page_count(pdf_bytes)
+    except Exception:
+        log.exception("PDF 열기 실패")
+        raise HTTPException(status_code=422, detail="PDF 파일을 열 수 없습니다. 손상된 파일일 수 있습니다.")
+
+    if pages > _MAX_PAGE_COUNT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{pages}페이지 문서입니다. 논문 PDF만 분석할 수 있습니다 "
+                   f"({_MAX_PAGE_COUNT}페이지 이하).")
 
     if not title or not abstract:
         try:
@@ -139,7 +159,8 @@ async def create_submission_from_pdf(
         raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
 
     submission = Submission(
-        user_id=current_user.user_id, title=title, abstract=abstract, content=None, field=field)
+        user_id=current_user.user_id, title=title, abstract=abstract, content=None,
+        field=field, pdf_bytes=pdf_bytes, page_count=pages)
     db.add(submission)
     db.commit()
     db.refresh(submission)
@@ -255,10 +276,14 @@ def get_analysis(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="아직 분석을 시작하지 않았습니다.")
 
+    # 선정된 논문이 먼저, 그 안에서 llm_rank 순. 나머지 후보는 검색 순위 순으로
+    # 뒤에 붙는다 — 프론트가 앞에서부터 잘라 써도 보여줄 것부터 나오게 한다.
     matches = db.scalars(
         select(SimilarPaperMatch)
         .where(SimilarPaperMatch.prediction_id == prediction.prediction_id)
-        .order_by(SimilarPaperMatch.rank)
+        .order_by(SimilarPaperMatch.selected.desc(),
+                  SimilarPaperMatch.llm_rank.nulls_last(),
+                  SimilarPaperMatch.rank)
     ).all()
 
     data = AnalysisResponse.model_validate(prediction)
