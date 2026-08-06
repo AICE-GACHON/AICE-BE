@@ -13,8 +13,12 @@ baselines 지적을 받으므로(§18), 검색을 아예 안 하고 흔한 aspec
 꽤 맞는다. 파이프라인이 그걸 못 이기면 검색·lift·Fisher가 값을 못 하는 것이다.
 그래서 모델 점수만 보지 말고 **lift(모델/베이스라인)를 보라.**
 
-    python scripts/eval_retrieval.py --n 200
-    python scripts/eval_retrieval.py --n 200 --top-k 100   # 창문 확대 비교
+    python -m scripts.eval_retrieval --n 200
+    python -m scripts.eval_retrieval --n 200 --top-k 100   # 창문 확대 비교
+
+⚠️ `python scripts/eval_retrieval.py` 로는 실행되지 않는다. 그렇게 부르면 파이썬이
+`scripts/` 를 sys.path 에 넣어 저장소 루트가 빠지고, `paper_assistant` 를 못 찾아
+ModuleNotFoundError 가 난다. 저장소 루트에서 `-m` 으로 실행할 것.
 
 같은 --seed면 같은 표본이라 설정 간 비교가 성립한다. LLM은 쓰지 않는다 —
 평가 대상이 검색·집계 층이기 때문이다($0).
