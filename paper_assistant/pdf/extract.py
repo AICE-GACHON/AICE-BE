@@ -18,9 +18,12 @@
 
 초록은 "Abstract"~"Introduction" 사이를 텍스트에서 잘라낸다.
 
-llm이 주어지면 Haiku로 정제한다(선택). 조판이 깨진 아주 오래된 PDF(1990년대
-TeX Type1 등)는 폰트 내부 코드로 합자를 저장해 어떤 추출기로도 복원이 어렵다 —
-그 경우 제목/초록 텍스트를 직접 붙여넣는 경로를 안내한다.
+llm이 주어지면 Haiku로 정제한다(선택).
+
+**텍스트 레이어가 없거나(스캔본) 깨진 경우** — 1990년대 TeX Type1처럼 폰트 내부
+코드로 합자를 저장하는 조판은 어떤 추출기로도 복원되지 않는다 — 앞 2페이지를
+그림으로 렌더해 Haiku 비전에 읽힌다(_from_page_images). **실패했을 때만** 돌기
+때문에 정상 업로드에는 비용이 붙지 않는다.
 """
 import logging
 import re
@@ -197,36 +200,108 @@ def _looks_garbled(s: str) -> bool:
     return singles / len(tokens) > 0.18
 
 
+# --- 스캔본 대응: 페이지를 그림으로 읽는다 -----------------------------------
+#
+# 렌더 해상도. Anthropic은 긴 변이 1568px를 넘으면 이미지를 **축소한 뒤** 토큰을
+# 계산한다 — 그보다 크게 만들면 우리가 만든 픽셀은 버려지고 인코딩 비용만 든다.
+# A4 긴 변 11.69in × 130dpi = 1520px라 상한 바로 아래에 들어간다.
+_VISION_DPI = 130
+# 제목과 초록은 앞 한두 장에만 있다. 표지가 따로 붙은 스캔본을 고려해 2장.
+_VISION_PAGES = 2
+
+_VISION_SYSTEM = (
+    "You are looking at page images of an academic paper. Read the title and the "
+    "abstract exactly as printed. "
+    'Return JSON {"title": ..., "abstract": ...} and nothing else. '
+    "Exclude author names, affiliations, footnote markers, and the heading word "
+    "'Abstract' itself. Transcribe the abstract verbatim — do not summarize, "
+    "shorten, translate, or invent. "
+    'If a field is genuinely not visible in these pages, return "" for it.')
+
+
+def _render_pages(pdf_bytes: bytes, pages: int = _VISION_PAGES,
+                  dpi: int = _VISION_DPI) -> list[bytes]:
+    """앞쪽 페이지를 PNG로 렌더한다."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return [doc[i].get_pixmap(dpi=dpi).tobytes("png")
+                for i in range(min(pages, doc.page_count))]
+    finally:
+        doc.close()
+
+
+def _from_page_images(pdf_bytes: bytes, llm) -> tuple[str, str]:
+    """페이지 그림을 Haiku 비전에 읽혀 (title, abstract)를 복원한다."""
+    from paper_assistant.graph.llm import HAIKU
+
+    images = _render_pages(pdf_bytes)
+    if not images:
+        return "", ""
+    out = llm.json_with_images(
+        HAIKU, _VISION_SYSTEM, images,
+        "Give me the title and the abstract of this paper.")
+    return (str(out.get("title") or "").strip(),
+            str(out.get("abstract") or "").strip())
+
+
 def extract_title_abstract(pdf_bytes: bytes, llm=None) -> tuple[str, str]:
     """PDF 바이트 → (title, abstract).
 
-    llm이 주어지면 Haiku로 정제한다(저자 잔여물 제거, 줄바꿈 정리 등).
+    llm이 주어지면 텍스트 추출 결과에 따라 갈린다:
+
+    - **멀쩡할 때** — Haiku로 정제만 한다 (저자 잔여물 제거, 줄바꿈 정리 등).
+    - **비었거나 깨졌을 때** — 페이지를 그림으로 렌더해 Haiku 비전에 읽힌다.
+      스캔본과 옛 조판이 여기서 살아난다. 예전에는 이 경우 그냥 422였다.
+
+    비전은 **실패했을 때만** 돈다. 정상 업로드에 비용이 붙지 않는 것이 이 분기의
+    전제다. llm이 없으면(LLM off) 예전과 완전히 동일하게 동작한다.
+
+    파이프라인의 나머지는 스캔본을 이미 처리한다 — LLM 재정렬이 PDF를 document
+    블록으로 넘기고 API가 페이지를 이미지로 렌더하기 때문이다. 막고 있던 것은
+    임베딩에 쓸 제목/초록을 **우리가** 못 뽑는다는 것뿐이었다.
     """
     spans, text = _page_spans(pdf_bytes)
     title = _title_from_spans(spans)
     abstract = _abstract_from_text(text)
+    garbled = _looks_garbled(text)
 
-    if _looks_garbled(text):
-        log.warning("PDF 텍스트 레이어가 손상된 것으로 보입니다 "
-                    "(옛날 조판). 제목/초록 직접 입력을 권장합니다.")
+    if llm is None:
+        if garbled or not title or not abstract:
+            log.warning("PDF 텍스트 추출이 부실합니다 (LLM off라 비전 폴백 없음).")
+        return title.strip(), abstract.strip()
 
-    if llm is not None:
-        from paper_assistant.graph.llm import HAIKU
+    if garbled or not title or not abstract:
+        log.info("PDF 텍스트 추출 부실 (title=%s, abstract=%d자, garbled=%s) "
+                 "→ 페이지 그림으로 다시 읽습니다.", bool(title), len(abstract), garbled)
+        try:
+            v_title, v_abstract = _from_page_images(pdf_bytes, llm)
+        except Exception:
+            # 비전이 실패해도 텍스트로 건진 것은 살린다 — 한쪽만 비어 있을 수 있고,
+            # 그 경우 호출자가 부분 결과로 판단할 여지가 남는다.
+            log.exception("비전 폴백 실패 — 텍스트 추출 결과를 그대로 씁니다.")
+            v_title = v_abstract = ""
+        # 필드 단위로 채운다. 비전이 제목만 읽어내는 경우가 있다.
+        return (v_title or title).strip(), (v_abstract or abstract).strip()
 
-        system = (
-            "You are given the title and abstract extracted from an academic PDF, "
-            "plus the raw first-page text. Clean them up: remove author names, "
-            "affiliations, footnote markers, and line-break artifacts from the title; "
-            "make sure the abstract is the paper's actual abstract. "
-            "Return JSON {\"title\": ..., \"abstract\": ...}. "
-            "Keep the abstract faithful to the content; do not summarize or invent.")
-        user = (f"EXTRACTED TITLE: {title}\n\n"
-                f"EXTRACTED ABSTRACT: {abstract[:2000]}\n\n"
-                f"RAW FIRST PAGE:\n{text[:2500]}")
-        out = llm.json(HAIKU, system, user, max_tokens=1500)
-        if out.get("title"):
-            title = out["title"].strip()
-        if out.get("abstract"):
-            abstract = out["abstract"].strip()
+    # 텍스트가 멀쩡한 정상 경로 — 정제만 한다.
+    from paper_assistant.graph.llm import HAIKU
+
+    system = (
+        "You are given the title and abstract extracted from an academic PDF, "
+        "plus the raw first-page text. Clean them up: remove author names, "
+        "affiliations, footnote markers, and line-break artifacts from the title; "
+        "make sure the abstract is the paper's actual abstract. "
+        "Return JSON {\"title\": ..., \"abstract\": ...}. "
+        "Keep the abstract faithful to the content; do not summarize or invent.")
+    user = (f"EXTRACTED TITLE: {title}\n\n"
+            f"EXTRACTED ABSTRACT: {abstract[:2000]}\n\n"
+            f"RAW FIRST PAGE:\n{text[:2500]}")
+    out = llm.json(HAIKU, system, user, max_tokens=1500)
+    if out.get("title"):
+        title = out["title"].strip()
+    if out.get("abstract"):
+        abstract = out["abstract"].strip()
 
     return title.strip(), abstract.strip()

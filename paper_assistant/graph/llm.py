@@ -70,7 +70,42 @@ class ClaudeLLM:
 
     def json(self, model: str, system: str, user: str, max_tokens: int = 1024):
         """JSON 응답을 기대하는 호출. 파싱 실패 시 빈 dict."""
-        text = self.text(model, system, user, max_tokens=max_tokens).strip()
+        return self._loads(self.text(model, system, user, max_tokens=max_tokens))
+
+    def json_with_images(self, model: str, system: str, images: list[bytes],
+                         user: str, max_tokens: int = 2000) -> dict:
+        """페이지 그림 + 지시문 → JSON.
+
+        **텍스트 레이어가 없는 PDF(스캔본)에서 쓴다.** PDF를 document 블록으로
+        통째로 넘기지 않고 호출자가 렌더한 페이지만 보내는 이유는 비용이다 —
+        document 블록은 60페이지짜리면 60장을 전부 이미지로 만든다. 제목과 초록은
+        앞 한두 장에만 있다.
+
+        Haiku 4.5는 구세대라 effort/thinking을 받지 않는다(400). 넘기지 않는다.
+        """
+        import base64
+
+        content: list[dict] = [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": "image/png",
+                        # standard_b64encode는 줄바꿈을 넣지 않는다 (API 요구사항).
+                        "data": base64.standard_b64encode(png).decode()}}
+            for png in images]
+        content.append({"type": "text", "text": user})
+
+        resp = self.client.messages.create(
+            model=model, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": content}])
+        self._log_usage(model, resp)
+        if resp.stop_reason == "max_tokens":
+            log.warning("%s 비전 응답이 max_tokens(%d)에서 잘렸습니다.",
+                        model, max_tokens)
+        return self._loads("".join(b.text for b in resp.content if b.type == "text"))
+
+    @staticmethod
+    def _loads(text: str) -> dict:
+        """모델이 뱉은 텍스트에서 JSON을 꺼낸다. 실패하면 빈 dict."""
+        text = text.strip()
         if text.startswith("```"):          # 코드펜스 제거
             text = text.split("```")[1].removeprefix("json").strip()
         try:

@@ -24,6 +24,7 @@ from app.schemas.submission import (
     SimilarPaperMatchResponse, SubmissionResponse, SubmissionSummary)
 from app.services.analysis import run_analysis
 from paper_assistant import extract_pdf_title_abstract, pdf_page_count
+from paper_assistant.graph.llm import get_llm
 
 log = logging.getLogger(__name__)
 
@@ -34,9 +35,10 @@ router = APIRouter(prefix="/api/submissions", tags=["submissions"])
 # 남는다 — 정리하지 않으면 그 초안은 두 번 다시 분석할 수 없다.
 STALE_AFTER = timedelta(minutes=15)
 
+# 스캔본은 이제 비전 폴백이 살린다(extract.py). 여기까지 왔다는 것은 논문이 아니거나
+# 비전도 읽지 못했다는 뜻이라, 원인을 스캔본으로 단정하지 않는다.
 _PDF_EXTRACT_ERROR = (
-    "PDF에서 제목과 초록을 추출할 수 없습니다. 스캔본이거나 텍스트 레이어가 없는 "
-    "PDF일 수 있습니다.")
+    "PDF에서 제목과 초록을 추출할 수 없습니다. 논문 PDF가 맞는지 확인해 주세요.")
 # Form 파라미터는 Pydantic Field(max_length=...) 검증을 안 타서 DB 컬럼 길이
 # (String(300)/String(100))를 넘기면 500이 난다. 여기서 미리 걸러 422로 통일한다.
 _MAX_TITLE_LEN = 300
@@ -148,7 +150,11 @@ async def create_submission_from_pdf(
 
     if not title or not abstract:
         try:
-            extracted_title, extracted_abstract = extract_pdf_title_abstract(pdf_bytes)
+            # llm을 넘기는 이유는 **스캔본**이다. 텍스트 추출이 실패하면 앞 2페이지를
+            # 그림으로 렌더해 Haiku 비전이 읽는다 (extract.py). 텍스트가 멀쩡하면
+            # 정제 호출 한 번(~$0.001)에 그치고, LLM이 꺼져 있으면 예전과 동일하다.
+            extracted_title, extracted_abstract = extract_pdf_title_abstract(
+                pdf_bytes, llm=get_llm())
         except Exception:
             log.exception("PDF 추출 실패")
             raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
