@@ -4,9 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import settings
 from app.core.errors import register_exception_handlers
+from app.core.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
 from app.core.rate_limit import limiter
 from app.routers import auth, corpus, onboarding, submissions, user
 from app.schemas.common import ApiResponse
@@ -36,23 +38,51 @@ async def lifespan(app: FastAPI):
     yield
 
 
+_is_production = settings.ENVIRONMENT == "production"
+
 app = FastAPI(
     title="AICE API",
     description="논문 평가 및 피드백 서비스 백엔드",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if settings.ENABLE_DOCS else None,
+    redoc_url="/redoc" if settings.ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if settings.ENABLE_DOCS else None,
 )
 
 app.state.limiter = limiter
+
+# 미들웨어는 **등록의 역순으로** 요청을 만난다. 본문 상한을 마지막에 등록해
+# 가장 먼저 돌게 하는 이유는, 24MB짜리 요청이 CORS·rate limit·라우팅을 거치기
+# 전에 끊기는 편이 싸기 때문이다.
+
 app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # 실제로 쓰는 메서드/헤더만 연다. "*"는 allow_credentials=True와 함께 쓰면
+    # 브라우저가 무시하기도 하고, 무엇보다 나중에 늘어난 헤더가 검토 없이
+    # 자동으로 허용된다.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    max_age=600,
 )
+
+# https 뒤에서 서비스할 때만 HSTS를 켠다 (개발 중 http localhost를 브라우저가
+# https로 기억해버리는 사고를 피한다).
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    enable_hsts=_is_production,
+    enable_docs=settings.ENABLE_DOCS,
+)
+
+# Host 헤더를 그대로 믿지 않는다. 기본값 ["*"]는 개발용이고, production에서
+# "*"를 남기면 app.core.config의 검증이 기동을 막는다.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
+
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BYTES)
 
 register_exception_handlers(app)
 

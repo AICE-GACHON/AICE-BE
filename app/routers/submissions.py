@@ -8,12 +8,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import (
-    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status)
+    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response,
+    UploadFile, status)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user
+from app.core.rate_limit import limiter, user_or_ip
 from app.database import get_db
 from app.models.analysis import IN_PROGRESS, ReviewPrediction, SimilarPaperMatch
 from app.models.submission import Submission
@@ -43,7 +45,24 @@ _PDF_EXTRACT_ERROR = (
 # (String(300)/String(100))를 넘기면 500이 난다. 여기서 미리 걸러 422로 통일한다.
 _MAX_TITLE_LEN = 300
 _MAX_FIELD_LEN = 100
+_MAX_ABSTRACT_LEN = 20_000  # Text 컬럼이라 DB 상한이 없다 — 여기서만 막힌다
 _MAX_PDF_BYTES = 20 * 1024 * 1024  # 20MB — 논문 PDF치고 넉넉한 상한. 메모리에 통째로 읽으므로 무제한은 위험하다.
+_PDF_CHUNK = 1024 * 1024           # 상한 검사를 위해 나눠 읽는 단위
+
+# 로그인해야 부를 수 있지만 **호출마다 돈이 나가는** 두 엔드포인트의 상한.
+# 인증만으로는 예산을 지킬 수 없다 — 계정 하나만 만들면 무한히 부를 수 있기
+# 때문이다. `/story`에 이미 같은 이유로 상한이 걸려 있다(routers/corpus.py).
+#
+# 키가 IP가 아니라 **계정**인 이유는 rate_limit.user_or_ip 주석 참고.
+#
+# 업로드 20/hour: 업로드 1회는 PDF 추출 LLM 호출(정제 ~$0.001, 스캔본이면 비전
+# 2페이지)이 붙고 20MB가 DB에 남는다. 한 사람이 논문 20편을 한 시간에 올릴 일은
+# 없고, 스크립트로 훑는 경우는 여기서 멈춘다.
+#
+# 분석 10/hour: 1회가 최대 약 $0.36(60p 재정렬 + 종합)이다. 계정당 시간당 $3.6이
+# 상한이 되고, 정상 사용(초안 하나를 고쳐가며 몇 번 돌려보기)은 넉넉히 들어간다.
+_UPLOAD_LIMIT = "20/hour"
+_ANALYSIS_LIMIT = "10/hour"
 
 # 페이지 상한이 둘인 이유: 경고와 거부는 다른 일이다.
 #
@@ -100,9 +119,35 @@ def _expire_stale(db: Session, submission_id: uuid.UUID) -> None:
 
 # ------------------------------------------------------------------ 초안 CRUD
 
+async def _read_capped(upload: UploadFile, max_bytes: int) -> bytes:
+    """상한까지만 읽고, 넘으면 즉시 끊는다.
+
+    예전에는 `await upload.read()`로 통째로 읽은 **뒤에** 길이를 봤다. 그러면
+    거부할 파일도 일단 전부 메모리에 올라간다 — 로그인한 사용자 한 명이 수 GB짜리
+    본문을 보내면 상한 검사에 도달하기 전에 서버가 죽는다. 검사가 읽기보다
+    먼저여야 의미가 있다.
+
+    한 청크를 더 읽어보는 이유: 정확히 max_bytes에서 멈추면 "딱 상한"과 "상한
+    초과"를 구분할 수 없다.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(_PDF_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="PDF 용량이 너무 큽니다 (20MB 초과).")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post(
     "/pdf", response_model=ApiResponse[SubmissionResponse], status_code=status.HTTP_201_CREATED)
+@limiter.limit(_UPLOAD_LIMIT, key_func=user_or_ip)
 async def create_submission_from_pdf(
+    request: Request,
     pdf: UploadFile = File(...),
     title: str = Form(""),
     abstract: str = Form(""),
@@ -130,9 +175,13 @@ async def create_submission_from_pdf(
     if len(title) > _MAX_TITLE_LEN or (field is not None and len(field) > _MAX_FIELD_LEN):
         raise HTTPException(status_code=422, detail="title/field 길이가 너무 깁니다.")
 
-    pdf_bytes = await pdf.read()
-    if len(pdf_bytes) > _MAX_PDF_BYTES:
-        raise HTTPException(status_code=422, detail="PDF 용량이 너무 큽니다 (20MB 초과).")
+    # abstract는 Text 컬럼이라 DB가 막아주지 않는다. 상한이 없으면 초록 자리에
+    # 수 MB짜리 문자열을 넣어 행을 부풀릴 수 있고, 그 값은 그대로 임베딩·LLM
+    # 입력으로 흘러간다. 논문 초록은 길어야 수천 자다.
+    if len(abstract) > _MAX_ABSTRACT_LEN:
+        raise HTTPException(status_code=422, detail="abstract 길이가 너무 깁니다.")
+
+    pdf_bytes = await _read_capped(pdf, _MAX_PDF_BYTES)
 
     # 페이지 수를 **추출보다 먼저** 본다 — 거부할 문서에 파싱 비용을 쓰지 않는다.
     # 여기서 PDF가 열리지 않으면 손상된 파일이므로 추출도 어차피 실패한다.
@@ -158,8 +207,11 @@ async def create_submission_from_pdf(
         except Exception:
             log.exception("PDF 추출 실패")
             raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
-        title = title or extracted_title
-        abstract = abstract or extracted_abstract
+        # 추출값도 상한을 넘을 수 있다(조판이 이상한 PDF에서 초록 경계를 놓치면
+        # 본문 전체가 딸려온다). 사용자가 보낸 값이 아니라 우리 추출기의 실수이므로
+        # 거부하지 말고 자른다 — 임베딩은 어차피 앞부분만 쓴다.
+        title = title or extracted_title[:_MAX_TITLE_LEN]
+        abstract = abstract or extracted_abstract[:_MAX_ABSTRACT_LEN]
 
     if not title or not abstract:
         raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
@@ -220,7 +272,9 @@ def delete_submission(
 @router.post("/{submission_id}/analysis",
              response_model=ApiResponse[AnalysisStartResponse],
              status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(_ANALYSIS_LIMIT, key_func=user_or_ip)
 def start_analysis(
+    request: Request,
     submission_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -233,6 +287,9 @@ def start_analysis(
 
     이미 진행 중인 분석이 있으면 새로 만들지 않고 그것을 돌려줍니다. 동시 요청
     경합은 DB의 부분 유니크 인덱스가 막고, 그때도 진행 중인 것을 돌려줍니다.
+
+    ⚠️ **계정 기준 시간당 10회로 제한됩니다.** 1회가 최대 약 $0.36이라, 인증만으로는
+    예산을 지킬 수 없습니다 (계정 하나로 무한히 부를 수 있으므로).
     """
     _owned_submission(db, submission_id, current_user)
     _expire_stale(db, submission_id)

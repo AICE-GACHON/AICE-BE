@@ -111,7 +111,7 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-295개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
+342개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
 ### 8. 프론트엔드 함께 띄우기
@@ -139,6 +139,56 @@ VITE_API_BASE_URL=http://localhost:8000
 
 백엔드 CORS 허용 목록(`app/core/config.py`의 `CORS_ORIGINS`)에 5173~5175가 이미
 들어 있습니다 — 5174/5175는 vite가 포트 충돌 시 자동으로 올라가는 자리입니다.
+
+## 배포 전 점검
+
+배포 설정(Dockerfile 등)은 아직 없지만, **틀리면 공개되는 설정들은 코드가 막습니다.**
+`.env`에 `ENVIRONMENT=production`을 넣으면 아래가 전부 기동 시점에 검사되고, 하나라도
+어긋나면 서버가 뜨지 않습니다. 경고 로그로 두지 않은 이유는 기동 로그를 아무도 읽지
+않기 때문입니다 — 조용히 뜨는 것보다 안 뜨는 편이 낫습니다.
+
+```bash
+# .env
+ENVIRONMENT=production
+JWT_SECRET_KEY=<python -c "import secrets; print(secrets.token_urlsafe(48))">
+CORS_ORIGINS=["https://실제-프론트-도메인"]
+ALLOWED_HOSTS=["실제-API-도메인"]
+```
+
+| 검사 | 통과 못 하면 |
+|---|---|
+| `JWT_SECRET_KEY`가 `.env.example` 예시 값이거나 32자 미만 | 기동 거부 (환경 무관) |
+| `CORS_ORIGINS`에 `*`·`localhost`·`http://`가 남아 있음 | 기동 거부 |
+| `ALLOWED_HOSTS`가 `*` | 기동 거부 |
+| `ENABLE_DOCS`를 명시하지 않음 | `/docs`·`/openapi.json` 자동으로 닫힘 |
+
+`JWT_SECRET_KEY`를 특히 조심하세요. 이 값이 새면 공격자가 임의 `user_id`로
+`access_token`을 만들어 **아무 계정으로나 로그인**할 수 있고, 서버는 그것을 정상
+로그인과 구분할 방법이 없습니다. `.env.example`의 문자열은 공개 저장소에 적혀 있으므로
+"아직 안 바꿨다"와 "유출됐다"가 같은 뜻입니다.
+
+### 워커를 늘릴 때
+
+rate limit 저장소 기본값은 **프로세스 메모리**입니다. `uvicorn --workers 4`로 띄우면
+워커마다 따로 세서 실제 상한이 4배가 됩니다. LLM 예산이 걸린 상한(업로드·분석·`/story`)이
+전부 여기 얹혀 있으니, 워커를 늘릴 거면 Redis를 먼저 붙이세요.
+
+```
+RATE_LIMIT_STORAGE_URI=redis://호스트:6379
+```
+
+### 남아 있는 것
+
+- **프론트가 토큰을 `localStorage`에 둡니다.** XSS가 한 번이라도 성립하면 토큰이 통째로
+  털립니다. 현재 프론트에 `dangerouslySetInnerHTML`이나 `eval` 경로는 없지만, 방어가
+  "앞으로도 XSS를 안 만든다"에 걸려 있는 상태입니다. httpOnly 쿠키로 옮기려면 백엔드에
+  CSRF 방어와 `SameSite` 정책이 함께 와야 해서, 별도 작업으로 남겨 둡니다.
+- **`refresh_token`에 재사용 탐지가 없습니다.** 유출되면 만료(14일)까지 유효하고,
+  회전 후에도 이전 토큰이 계속 먹힙니다. `token_version`을 매 refresh마다 올리면
+  막히지만 그러면 기기 두 대에서 동시에 로그인할 수 없게 되므로, 트레이드오프를
+  정한 뒤에 손대야 합니다.
+- **HTTPS 종료는 리버스 프록시의 몫입니다.** `ENVIRONMENT=production`이면 HSTS 헤더는
+  나가지만, 평문 http로 서비스하면서 켜면 브라우저가 그 도메인을 https로 기억해 버립니다.
 
 ## 유사 논문을 어떻게 고르는가 (2단계)
 
@@ -262,4 +312,5 @@ AI 파트가 실측으로 확인한 함정이라 UI에 그대로 반영해야 �
   적재하지 않았습니다.
 - 위에서 채운 `citation_count`·`final_venue`는 **아직 검색·분석이 읽지 않습니다.**
   저장만 돼 있고 랭킹이나 리포트에 반영되지 않습니다.
-- 배포 설정(Dockerfile 등)은 없습니다.
+- 배포 설정(Dockerfile 등)은 없습니다. 다만 설정 자체의 안전장치는 코드에 있습니다 —
+  "배포 전 점검" 참고.

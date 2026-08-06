@@ -22,6 +22,12 @@ from app.models.submission import Submission
 
 log = logging.getLogger(__name__)
 
+# 사용자에게 보여줄 실패 문구. 원인 분류는 로그의 몫이다 — 응답에 실리는 문자열은
+# 사용자가 할 수 있는 일(다시 시도)만 말한다.
+_GENERIC_FAILURE = (
+    "분석에 실패했습니다. 잠시 후 다시 시도해 주세요. "
+    "계속 실패하면 다른 PDF로 시도해 보세요.")
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -59,11 +65,18 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
             # 초안은 pdf_bytes가 None이라 제목·초록만으로 돌아간다.
             report = analyze(title=submission.title, abstract=submission.abstract,
                              pdf_bytes=submission.pdf_bytes)
-        except Exception as exc:
+        except Exception:
             # 분석 실패는 서버 장애가 아니라 이 작업의 상태다. 사용자가 폴링으로
             # 확인할 수 있도록 failed로 기록하고 예외를 삼킨다.
+            #
+            # ⚠️ **예외 문자열을 그대로 저장하지 않는다.** 이 값은 GET
+            # /api/submissions/{id}/analysis의 error 필드로 사용자에게 그대로
+            # 나간다. psycopg의 OperationalError에는 DB 호스트·포트·사용자명이,
+            # anthropic 예외에는 요청 URL과 응답 본문이, 파일 관련 예외에는 서버
+            # 경로가 들어 있다 — 전부 공격자가 다음 수를 정하는 데 쓰는 정보다.
+            # 진짜 원인은 로그(스택트레이스 포함)에만 남긴다.
             log.exception("analyze() 실패 (prediction_id=%s)", prediction_id)
-            _mark_failed(db, prediction, f"{type(exc).__name__}: {exc}")
+            _mark_failed(db, prediction, _GENERIC_FAILURE)
             return
 
         prediction.report = report.model_dump(mode="json")

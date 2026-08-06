@@ -38,7 +38,10 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
     try:
         user = db.get(User, uuid.UUID(user_id))
-    except ValueError:
+    except (ValueError, TypeError):
+        # sub가 UUID 문자열이 아니면 ValueError, 문자열이 아예 아니면(숫자 등)
+        # TypeError다. 후자를 놓치면 500이 난다 — routers/auth.py의 refresh는
+        # 이미 둘 다 잡고 있어서, 여기만 다르면 같은 입력에 응답이 갈린다.
         raise credentials_exception
 
     if user is None:
