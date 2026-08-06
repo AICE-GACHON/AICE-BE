@@ -5,9 +5,10 @@ import pytest
 
 from paper_assistant.retrieval import hybrid_search
 from paper_assistant.retrieval.hybrid_search import (
-    CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE, RRF_K,
-    W_CITATION, W_RECENCY, W_SIMILARITY, _ef_search_for, match_type, max_rrf,
-    recency_score, rerank, rrf_fuse, weighted_score)
+    CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE,
+    RERANK_CANDIDATES, RRF_K, W_CITATION, W_RECENCY, W_SIMILARITY,
+    _ef_search_for, match_type, max_rrf, recency_score, rerank, rrf_fuse,
+    weighted_score)
 
 
 def test_match_type_reflects_which_retrievers_hit():
@@ -116,14 +117,40 @@ def test_half_life_is_read_at_call_time_not_bound_at_definition(monkeypatch):
     assert hybrid_search.recency_score(2019, 2025) == pytest.approx(0.5)
 
 
-def test_candidate_pool_is_read_at_call_time_too():
-    """hybrid_search 의 pool 도 같은 함정을 피해야 한다.
+@pytest.mark.parametrize("param", ["pool", "top_k"])
+def test_search_knobs_are_read_at_call_time_too(param):
+    """hybrid_search 의 pool·top_k 도 같은 함정을 피해야 한다.
 
-    DB 없이 확인할 수 있는 지점은 기본값이 None 인지다. `= CANDIDATE_POOL` 로
-    되돌리는 순간 상수 변경이 반영되지 않는다.
+    DB 없이 확인할 수 있는 지점은 기본값이 None 인지다. `= CANDIDATE_POOL` /
+    `= RERANK_CANDIDATES` 로 되돌리는 순간 상수 변경이 반영되지 않는다.
     """
-    default = inspect.signature(hybrid_search.hybrid_search).parameters["pool"].default
+    default = inspect.signature(hybrid_search.hybrid_search).parameters[param].default
     assert default is None
+
+
+def test_pool_is_at_least_double_the_candidates_returned():
+    """재정렬은 후보 풀 위에서만 일어난다 — 풀이 좁으면 상위 절반을 넘길 수 없다.
+
+    RERANK_CANDIDATES 를 올릴 때 CANDIDATE_POOL 을 같이 올리는 것을 잊으면, 반환
+    목록의 뒤쪽이 사실상 풀 하위로 채워진다. 에러가 안 나서 알아채기 어렵다.
+    """
+    assert CANDIDATE_POOL >= RERANK_CANDIDATES * 2
+
+
+def test_both_retrievers_filter_on_reviews_identically():
+    """리뷰 보유 조건을 한쪽 검색기에만 걸면 RRF 결합이 조용히 왜곡된다.
+
+    한쪽만 필터링하면 그쪽 순위표만 짧아져, 걸러진 논문 뒤에 있던 문서들의 순위가
+    반대쪽 대비 앞당겨진다. 점수가 틀리지만 에러는 안 난다. 두 쿼리가 **같은**
+    조건 문자열을 참조하는지로 검증한다.
+    """
+    src = inspect.getsource(hybrid_search)
+    vector_sql = inspect.getsource(hybrid_search._vector_search)
+    fts_sql = inspect.getsource(hybrid_search._fulltext_search)
+    assert "_HAS_REVIEWS" in vector_sql
+    assert "_HAS_REVIEWS" in fts_sql
+    # 조건이 실제로 reviews 를 보는지 (상수만 있고 내용이 바뀐 경우를 잡는다)
+    assert "FROM reviews" in src and "EXISTS" in hybrid_search._HAS_REVIEWS
 
 
 def test_recency_is_monotonic_in_year():

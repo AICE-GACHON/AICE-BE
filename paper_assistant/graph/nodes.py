@@ -42,11 +42,15 @@ def input_node(state: PipelineState, embedder, llm) -> dict:
 
 # ------------------------------------------------------------ retrieval
 def retrieval_node(state: PipelineState, embedder, llm) -> dict:
-    """SPECTER2 임베딩 → 하이브리드 검색 top-K."""
+    """SPECTER2 임베딩 → 하이브리드 검색으로 LLM 재정렬에 넘길 후보 확보.
+
+    top_k를 넘기지 않는다 — 후보 수는 hybrid_search.RERANK_CANDIDATES 하나가 소유한다.
+    여기서 숫자를 다시 적으면 상수를 바꿔도 반영되지 않는 자리가 하나 더 생긴다.
+    """
     title = state["query_title"]
     abstract = state.get("query_abstract", "")
     qvec = embedder.encode_one(title, abstract).numpy()
-    results = hybrid_search(qvec, f"{title} {abstract}", top_k=20)
+    results = hybrid_search(qvec, f"{title} {abstract}")
     return {"query_embedding": qvec.tolist(), "similar_papers": results}
 
 

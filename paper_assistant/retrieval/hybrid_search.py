@@ -1,5 +1,10 @@
 """하이브리드 검색: SPECTER2 벡터 + Postgres full-text, RRF로 결합 후 재정렬.
 
+**이 모듈은 2단계 추천의 1단계다.** 여기서 뽑은 후보를 LLM이 입력 PDF 원문과 대조해
+최종 5편을 고른다(graph/nodes.py의 llm_rerank). 따라서 이 층의 책임은 **정밀도가 아니라
+재현율**이다 — "충분히 비슷한 대역"을 넓게 확보해서 판정자에게 넘기는 것이 목적이고,
+그 안에서 누가 더 비슷한지를 가리는 일은 여기서 하지 않는다(할 수도 없다, 아래 참고).
+
 왜 하이브리드인가 (§11.2 실측 근거):
 SPECTER2의 코사인 유사도는 0.72~0.98의 좁은 구간에 압축되어 있어 절대 임계값을
 쓸 수 없고, 'CIFAR-10', 'LoRA' 같은 고유명사 정확 매칭에도 약하다.
@@ -32,18 +37,40 @@ log = logging.getLogger(__name__)
 
 RRF_K = 60
 
-# 재정렬 도입 때 "풀이 좁으면 최신성이 끌어올릴 후보가 없다"는 이유로 150까지
-# 넓혔다가 **50으로 되돌렸다.** 실측 결과(docs/랭킹_가중치_설계.md §11.6):
+# LLM에게 넘길 후보 수. **여기서 최종 편수를 정하지 않는다** — 최종 5편은 LLM이 고른다.
 #
-#   풀 150 : 0.488 → 0.503  (+3.1%)
+# 50인 이유는 재현율이 아니라 **판정 대역의 폭**이다. 후보 50편은 전부 코사인 0.93+
+# 대역이고(docs/추천_파이프라인_재설계.md §4.3) 임베딩은 그 안에서 순위를 매기지 못한다
+# — 상위 20편의 코사인 폭이 0.013뿐이다(설계서 §20). 그 구간을 실제로 가를 수 있는 건
+# 본문·참고문헌을 읽는 LLM뿐이므로, 고를 거리를 더 주는 것이 이 구조에서 유일하게
+# 의미 있는 레버다. 비용은 후보 1편당 약 400토큰(≈$0.0008)이라 30 → 50이 총비용 +8%다.
+#
+# 100으로 올리지 않은 이유: 후보 100편을 한 프롬프트에 넣는 리스트와이즈 재정렬은
+# 위치 편향으로 순위 품질이 흔들리기 시작하는 구간이라 측정 없이 들어가지 않는다.
+RERANK_CANDIDATES = 50
+
+# 재정렬 도입 때 150까지 넓혔다가 50으로 되돌렸고, 2단계 구조 도입과 함께 **100으로
+# 올렸다.** 되돌렸던 근거(docs/랭킹_가중치_설계.md §11.6)는 이랬다:
+#
+#   풀 150 : 0.488 → 0.503  (+3.1%)     ← 표본 150편 기준 노이즈 범위
 #   풀  50 : 0.490 → 0.489  (변화 없음)
 #
-# 정확도 이득이 넓은 풀에 딸려 있던 것은 맞다 — 재정렬은 이미 검색된 후보만
-# 재배치하므로 풀이 좁으면 끌어올릴 최신 논문 자체가 적다. 다만 그 차이 0.014는
-# 표본 150편 기준 노이즈 범위 안이라, 검색 비용 3배(ef_search 200 → 600)를 지불할
-# 근거로는 약하다고 판단했다. **요구사항 자체는 풀 50에서도 그대로 달성된다**
-# (2025년 비중 43.5% → 87.9%).
-CANDIDATE_POOL = 50   # 각 검색기에서 가져올 후보 수
+# 그때는 "검색 비용 3배를 지불할 근거로 약하다"가 결론이었다. **지금 다시 올리는
+# 이유는 정확도가 아니라 산술이다** — 재정렬은 후보 풀 위에서만 일어나므로, 풀 50
+# (합집합 최대 100편)에서 상위 50편을 꺼내면 후보 절반이 사실상 풀 하위가 된다.
+# RERANK_CANDIDATES 의 최소 2배는 있어야 상위 절반만 넘길 수 있다.
+#
+# ⚠️ **풀을 키우면 최신성 요구가 깨지는 지점에 가까워진다.** RRF 최하위 후보의 점수가
+# 1/(RRF_K + 풀)이라, 풀이 넓을수록 유사도가 만드는 점수 폭이 커져 최신성이 이기기
+# 어려워진다. test_newest_paper_wins_over_the_most_similar_one 의 여유:
+#
+#   풀  50 → +0.0553      풀 125 → +0.0160
+#   풀 100 → +0.0250  ←   풀 150 → +0.0091
+#   풀  75 → +0.0373      풀 200 → -0.0007  (깨진다)
+#
+# 100은 상한(150~200 사이)에서 충분히 떨어져 있다. 이 값이나 W_*, RECENCY_HALF_LIFE를
+# 건드리면 반드시 그 테스트를 다시 돌릴 것 (테스트가 상수를 읽으므로 자동으로 따라온다).
+CANDIDATE_POOL = 100   # 각 검색기에서 가져올 후보 수
 
 # HNSW는 ef_search(기본 40)보다 많은 행을 반환하지 못한다. CANDIDATE_POOL이 50이라
 # 기본값 그대로면 벡터 후보가 40개로 잘려 RRF 결합이 한쪽만 얕아진다 (§20 실측).
@@ -118,6 +145,22 @@ class SearchResult:
     """같은 연도 내 인용 백분위 [0,1]. 결측이면 중립값 0.5."""
 
 
+# 리뷰가 없는 논문을 후보에서 제외하는 조건. **두 검색기가 반드시 같은 조건을 써야
+# 한다** — 한쪽만 걸면 RRF 결합에서 한쪽 순위만 밀려 점수가 조용히 왜곡된다.
+#
+# 이 서비스가 보여주는 것은 유사 논문 자체가 아니라 그 논문이 받은 리뷰다(README).
+# 리뷰가 없는 논문은 후보에 올라봐야 사용자에게 보여줄 것이 없다.
+#
+# 실측(2026-08-06): 43,515편 중 43,034편(98.9%)이 통과한다. 걸러지는 481편은 전부
+# ICLR 2024(329)·2025(152)이고 대부분 withdrawn·desk-reject다. 그리고 리뷰가 있는
+# 논문은 **전부** weaknesses 원문이 비어 있지 않으므로, 이 조건 하나로 "리뷰를
+# 보여준다"는 약속이 항상 지켜진다.
+#
+# 1.1%만 걸러지므로 HNSW post-filter로 인한 후보 손실은 무시할 수준이다 —
+# ef_search가 limit의 4배라 걸러낸 뒤에도 limit을 채우고 남는다.
+_HAS_REVIEWS = "EXISTS (SELECT 1 FROM reviews r WHERE r.paper_id = p.id)"
+
+
 def _vector_search(cur, embedding, limit: int) -> list[tuple[int, float]]:
     """(paper_id, 코사인 유사도) 순위순. 벡터는 L2 정규화 상태로 저장돼 있다."""
     # ef_search < limit이면 요청한 개수를 못 채운다 (기본 40 < pool 50).
@@ -128,11 +171,11 @@ def _vector_search(cur, embedding, limit: int) -> list[tuple[int, float]]:
     cur.execute("SELECT set_config('hnsw.ef_search', %s, true)",
                 (str(_ef_search_for(limit)),))
     cur.execute(
-        """
-        SELECT id, 1 - (embedding <=> %s) AS cosine
-        FROM papers
-        WHERE embedding IS NOT NULL
-        ORDER BY embedding <=> %s
+        f"""
+        SELECT p.id, 1 - (p.embedding <=> %s) AS cosine
+        FROM papers p
+        WHERE p.embedding IS NOT NULL AND {_HAS_REVIEWS}
+        ORDER BY p.embedding <=> %s
         LIMIT %s
         """,
         (embedding, embedding, limit),
@@ -155,7 +198,7 @@ def _fulltext_search(cur, query_text: str, limit: int) -> list[int]:
     않는다 — 실측으로 매칭 수 33,638편, top-50, 1위까지 인용 전후가 동일하다.
     """
     cur.execute(
-        """
+        f"""
         WITH q AS (
             SELECT to_tsquery('english', string_agg(quote_literal(lexeme), ' | '))
                    AS query
@@ -163,7 +206,7 @@ def _fulltext_search(cur, query_text: str, limit: int) -> list[int]:
         )
         SELECT p.id
         FROM papers p, q
-        WHERE q.query IS NOT NULL AND p.tsv @@ q.query
+        WHERE q.query IS NOT NULL AND p.tsv @@ q.query AND {_HAS_REVIEWS}
         ORDER BY ts_rank(p.tsv, q.query) DESC
         LIMIT %s
         """,
@@ -302,21 +345,27 @@ def _fetch_metadata(cur, paper_ids: list[int]) -> dict[int, tuple]:
     return {row[0]: row[1:] for row in cur.fetchall()}
 
 
-def hybrid_search(embedding, query_text: str, top_k: int = 20,
+def hybrid_search(embedding, query_text: str, top_k: int | None = None,
                   pool: int | None = None) -> list[SearchResult]:
     """벡터·full-text를 RRF로 결합하고 가중합으로 재정렬해 상위 top_k편 반환.
 
     embedding: SPECTER2로 인코딩한 쿼리 벡터 (L2 정규화된 numpy/list)
     query_text: full-text 검색에 쓸 원문 (보통 제목 + 초록)
+    top_k: 반환할 후보 수. None이면 RERANK_CANDIDATES (LLM 재정렬에 넘길 수).
     pool: 각 검색기에서 가져올 후보 수. None이면 CANDIDATE_POOL.
 
-    반환 순서는 **final_score 기준**이다. rrf_score도 같이 실어 보내지만 그건
-    유사도 성분일 뿐이라 정렬 기준이 아니다.
+    **리뷰가 있는 논문만 반환한다** (_HAS_REVIEWS 참고).
 
-    pool 기본값을 `= CANDIDATE_POOL`로 쓰지 않는 이유는 recency_score와 같다 —
-    파이썬 기본 인자는 정의 시점에 한 번 평가되므로, 튜닝 실험이 모듈 상수를
-    바꿔도 반영되지 않아 조용히 옛 값으로 검색하게 된다.
+    반환 순서는 **final_score 기준**이다. rrf_score도 같이 실어 보내지만 그건
+    유사도 성분일 뿐이라 정렬 기준이 아니다. 그리고 이 순서는 최종 순서가 아니다 —
+    LLM 재정렬이 이 목록을 받아 다시 고른다.
+
+    top_k·pool 기본값을 `= RERANK_CANDIDATES` / `= CANDIDATE_POOL`로 쓰지 않는 이유는
+    recency_score와 같다 — 파이썬 기본 인자는 정의 시점에 한 번 평가되므로, 튜닝
+    실험이 모듈 상수를 바꿔도 반영되지 않아 조용히 옛 값으로 검색하게 된다.
     """
+    if top_k is None:
+        top_k = RERANK_CANDIDATES
     if pool is None:
         pool = CANDIDATE_POOL
     with cursor() as cur:
