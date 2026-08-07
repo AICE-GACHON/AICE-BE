@@ -19,7 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from paper_assistant import config
 from paper_assistant.embedding.specter2 import Specter2Embedder
 from paper_assistant.graph import nodes
-from paper_assistant.graph.llm import get_llm
+from paper_assistant.llm import get_llm
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.schemas import Report
 

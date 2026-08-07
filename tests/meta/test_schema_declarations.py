@@ -20,7 +20,7 @@ from pathlib import Path
 
 from app.models.analysis import IN_PROGRESS, ReviewPrediction
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 INIT_DB_SQL = ROOT / "scripts" / "init_db.sql"
 ALEMBIC_ENV = ROOT / "alembic" / "env.py"
 

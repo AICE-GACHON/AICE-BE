@@ -1049,7 +1049,7 @@ python scripts/run_enrichment.py      # 하베스트 → arXiv 매칭 → S2 보
   각자 `decide`로 두고, 요청→대기→재시도→소진 예외만 공유한다.
 - 환경설정 단일화: `paper_assistant/config.py`가 공유 값(DB·LLM 토글)의 소스이고
   `app/core/config.py`는 그것을 읽는다. 예전에는 `PAPER_ASSISTANT_USE_LLM`을 세 곳
-  (`app.core.config`, `paper_assistant.config`, `graph/llm.py`의 `os.getenv`)에서 각각
+  (`app.core.config`, `paper_assistant.config`, `llm.py`의 `os.getenv`)에서 각각
   읽었다.
 - `aspect_base_rates` / `venue_stats`의 `CREATE TABLE`이 `init_db.sql`과 배치 스크립트
   양쪽에 있었다. 스키마 소유자는 `init_db.sql` 하나로 정리.

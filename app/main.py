@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
         yield
         return
     try:
-        from paper_assistant.graph.pipeline import warmup
+        from paper_assistant import warmup
 
         log.info("분석 파이프라인 워밍업 (SPECTER2 로드)...")
         warmup()

@@ -21,7 +21,7 @@ from paper_assistant.embedding.specter2 import (
 from paper_assistant.graph.evidence import (
     MAX_POINTS_PER_PAPER, build_evidence_for_selected, format_for_prompt,
     validate_citations)
-from paper_assistant.graph.llm import (
+from paper_assistant.llm import (
     RERANK_EFFORT, RERANK_MAX_TOKENS, SONNET, SONNET_EFFORT, SONNET_MAX_TOKENS)
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.retrieval.hybrid_search import hybrid_search

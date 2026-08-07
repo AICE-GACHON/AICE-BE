@@ -17,9 +17,9 @@ ML/AI 논문 리서치 어시스턴트 — 백엔드(FastAPI) + AI 분석 파이
 |---|---|---|
 | `app/` | 백엔드 | FastAPI 앱 — 인증, 초안 CRUD, 분석 요청/조회, 코퍼스 조회 API |
 | `alembic/` | 백엔드 | 서비스 테이블(users/submissions/온보딩/분석 결과) 마이그레이션 |
-| `paper_assistant/` | AI | 검색·분석 파이프라인. 공개 API는 함수 7개뿐 |
+| `paper_assistant/` | AI | 검색·분석 파이프라인. 공개 API는 함수 9개뿐 |
 | `scripts/` | AI | 코퍼스 스키마(`init_db.sql`)와 운영 배치 (수집·집계·복원) |
-| `tests/` | 공통 | `tests/app`(백엔드) + `tests/paper_assistant`(AI) |
+| `tests/` | 공통 | `tests/app`(백엔드) + `tests/paper_assistant`(AI) + `tests/meta`(설정 드리프트, DB 불필요) |
 | `docs/` | 공통 | 개발 문서 + 설계 근거 + 개편 기록 (아래 "문서" 참고) |
 
 **화면(프론트엔드)은 이 저장소에 없습니다.** 별도 저장소
@@ -111,7 +111,7 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-342개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
+341개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
 ### 8. 프론트엔드 함께 띄우기

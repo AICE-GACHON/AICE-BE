@@ -9,14 +9,14 @@
 있었고, 저자가 이렇게 답했고, 초록에는 이런 변화가 있었다는 **순서**까지만 말한다.
 프롬프트와 스텁 양쪽에 같은 제약을 건다.
 
-graph/llm.py 규약을 그대로 따른다: use_llm이 꺼져 있으면 llm이 None이고, 이때는
+llm.py 규약을 그대로 따른다: use_llm이 꺼져 있으면 llm이 None이고, 이때는
 결정론적 스텁이 같은 스키마를 채운다 (비용 0). used_llm은 설정값이 아니라 실행
 결과다.
 """
 import json
 import logging
 
-from paper_assistant.graph.llm import SONNET, SONNET_MAX_TOKENS
+from paper_assistant.llm import SONNET, SONNET_MAX_TOKENS
 from paper_assistant.schemas import (
     StoryNarrative, SubmissionJourney, TimelineEvent)
 

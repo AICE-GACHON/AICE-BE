@@ -1,6 +1,7 @@
-"""분석 실행 서비스 — 백엔드와 AI 파트가 만나는 유일한 지점.
+"""분석 서비스 — 분석 작업의 생애주기(시작·만료·조회)와 실제 실행.
 
-AI 파트의 공개 계약은 함수 네 개뿐이고, 그중 이 모듈이 쓰는 건 analyze() 하나다.
+백엔드와 AI 파트가 만나는 유일한 지점이다. AI 파트의 공개 계약 중 이 모듈이 쓰는
+것은 analyze() 하나다.
 
     from paper_assistant import analyze
     report = analyze(title, abstract)   # -> Report
@@ -11,16 +12,29 @@ analyze()는 stateless라 DB에 아무것도 쓰지 않는다. 결과를 사용�
 왜 백그라운드인가: analyze() 한 번에 SPECTER2 임베딩 로드(첫 호출 수십 초) + 하이브리드
 검색 + 집계가 들어간다. 요청 안에서 동기로 돌리면 프론트가 그만큼 멈춘다. 그래서
 라우터는 pending 행만 만들고 202로 돌아오고, 실제 실행은 여기서 한다.
+
+**작업 등록(BackgroundTasks)은 라우터에 남겨둔다.** 그건 요청-응답 수명주기에
+묶인 HTTP 관심사라, 여기로 끌고 오면 서비스가 FastAPI 요청 객체를 알아야 한다.
+이 모듈은 "어떤 행을 만들지"까지만 정하고, "언제 실행할지"는 호출자가 정한다.
 """
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models.analysis import ReviewPrediction, SimilarPaperMatch
+from app.models.analysis import IN_PROGRESS, ReviewPrediction, SimilarPaperMatch
 from app.models.submission import Submission
 
 log = logging.getLogger(__name__)
+
+# 이 시간이 지나도 pending/running이면 죽은 작업으로 본다. BackgroundTasks는
+# 프로세스에 묶여 있어서, 서버가 재시작되면 진행 중이던 행이 영원히 running으로
+# 남는다 — 정리하지 않으면 그 초안은 두 번 다시 분석할 수 없다.
+STALE_AFTER = timedelta(minutes=15)
 
 # 사용자에게 보여줄 실패 문구. 원인 분류는 로그의 몫이다 — 응답에 실리는 문자열은
 # 사용자가 할 수 있는 일(다시 시도)만 말한다.
@@ -31,6 +45,86 @@ _GENERIC_FAILURE = (
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# --------------------------------------------------------------- 작업 생애주기
+
+def latest_prediction(db: Session, submission_id: uuid.UUID) -> ReviewPrediction | None:
+    """가장 최근 분석 1건 (상태 무관). 폴링이 보는 대상이다."""
+    return db.scalars(
+        select(ReviewPrediction)
+        .where(ReviewPrediction.submission_id == submission_id)
+        .order_by(ReviewPrediction.created_at.desc())
+        .limit(1)
+    ).first()
+
+
+def active_prediction(db: Session, submission_id: uuid.UUID) -> ReviewPrediction | None:
+    """진행 중(pending/running)인 분석. 부분 유니크 인덱스가 최대 1건을 보장한다."""
+    return db.scalars(
+        select(ReviewPrediction)
+        .where(ReviewPrediction.submission_id == submission_id,
+               ReviewPrediction.status.in_(IN_PROGRESS))
+    ).first()
+
+
+def expire_stale(db: Session, submission_id: uuid.UUID) -> None:
+    """오래 매달려 있는 분석을 failed로 내린다 (부분 유니크 인덱스 슬롯도 함께 풀린다)."""
+    active = active_prediction(db, submission_id)
+    if active is None or active.created_at > _now() - STALE_AFTER:
+        return
+    active.status = "failed"
+    active.error = "분석이 완료되지 않은 채 중단되었습니다 (서버 재시작 등). 다시 시도해 주세요."
+    active.completed_at = _now()
+    db.commit()
+
+
+def start_prediction(db: Session,
+                     submission_id: uuid.UUID) -> tuple[ReviewPrediction, bool]:
+    """분석 행을 확보한다. (prediction, 새로 만들었는가)를 돌려준다.
+
+    두 번째 값이 False면 이미 진행 중인 작업을 그대로 돌려준 것이므로 **호출자는
+    백그라운드 작업을 새로 등록하면 안 된다** — 같은 분석이 두 번 돌면 비용도 두
+    배고, 두 실행이 같은 행에 결과를 쓴다.
+
+    동시 요청 경합은 DB의 부분 유니크 인덱스가 막고, 그때도 진행 중인 것을 돌려준다.
+    """
+    expire_stale(db, submission_id)
+
+    existing = active_prediction(db, submission_id)
+    if existing is not None:
+        return existing, False
+
+    prediction = ReviewPrediction(submission_id=submission_id, status="pending")
+    db.add(prediction)
+    try:
+        db.commit()
+    except IntegrityError:
+        # 같은 순간에 들어온 다른 요청이 먼저 만들었다 → 그 행을 돌려준다.
+        db.rollback()
+        existing = active_prediction(db, submission_id)
+        if existing is None:
+            raise
+        return existing, False
+
+    db.refresh(prediction)
+    return prediction, True
+
+
+def matches_for(db: Session, prediction_id: uuid.UUID) -> list[SimilarPaperMatch]:
+    """근거로 남긴 유사논문 후보들 (화면에 보일 순서로)."""
+    # 선정된 논문이 먼저, 그 안에서 llm_rank 순. 나머지 후보는 검색 순위 순으로
+    # 뒤에 붙는다 — 프론트가 앞에서부터 잘라 써도 보여줄 것부터 나오게 한다.
+    return list(db.scalars(
+        select(SimilarPaperMatch)
+        .where(SimilarPaperMatch.prediction_id == prediction_id)
+        .order_by(SimilarPaperMatch.selected.desc(),
+                  SimilarPaperMatch.llm_rank.nulls_last(),
+                  SimilarPaperMatch.rank)
+    ).all())
+
+
+# ------------------------------------------------------------------ 실제 실행
 
 
 def run_analysis(prediction_id: uuid.UUID) -> None:

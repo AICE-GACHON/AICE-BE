@@ -80,11 +80,13 @@ AICE/
 │   │   ├── common.py             # ApiResponse[T]
 │   │   ├── auth.py / submission.py / analysis.py
 │   │   └── corpus.py             # AI 파트 스키마 재수출 (중복 정의 금지)
-│   └── services/
+│   └── services/               # 도메인 규칙 — 라우터에는 HTTP 관심사만 남긴다
+│       ├── submissions.py        # 업로드 검증(용량·페이지·길이)·추출·저장, 소유권
 │       └── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
-├── paper_assistant/          # AI 파트 (공개 API 7개)
+├── paper_assistant/          # AI 파트 (공개 API 9개)
 │   ├── config.py               # ★ 공유 환경설정의 단일 소스
 │   ├── schemas.py              # Report 등 통합 계약 스키마
+│   ├── llm.py                  # Claude 래퍼 — graph/·query/·pdf/가 함께 쓴다
 │   ├── query/                  # 조회 전용 (detail, revisions, journey/timeline/narrative/story)
 │   ├── graph/                  # LangGraph 고정 DAG (input→retrieval→llm_rerank→review_fetch→synthesis)
 │   ├── retrieval/              # 하이브리드 검색 (벡터 + 전문검색 RRF)
@@ -95,9 +97,9 @@ AICE/
 │   └── db/                     # 커넥션 풀 + 적재 + 코퍼스 통계 캐시(stats.py)
 ├── scripts/                  # 코퍼스 스키마(init_db.sql) + 운영 배치 + cleanup_stale_onboarding.py
 ├── tests/
-│   ├── app/                    # 백엔드 (인증·소유권·분석 상태 전이)
+│   ├── app/                    # 백엔드 (인증·구글 로그인·소유권·분석 상태 전이)
 │   ├── paper_assistant/        # AI 파트
-│   └── test_backend_auth.py    # 백엔드 인증/온보딩 연동 라우터 테스트
+│   └── meta/                   # 설정·경계 드리프트 (소스만 읽으므로 DB 불필요)
 ├── docs/                     # 설계서·팀 공유 문서·개발 문서
 ├── alembic/versions/         # 0001 초기 테이블 … 0011 PDF 저장 + LLM 선정 (아래 §4 참고)
 ├── docker-compose.yml        # pgvector Postgres (포트 5433)
@@ -287,30 +289,38 @@ rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signu
 주지 않고 **401로 거절**합니다 — 조용히 주면 호출자가 방금 다시 만든 결과를 받았다고
 오해합니다. 저장소가 메모리라 워커를 여러 개로 늘리면
 워커별로 따로 세므로, 그때는 Redis 저장소로 바꿔야 합니다. 백엔드 테스트
-(`tests/test_backend_auth.py`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다.
+(`tests/app/`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다 (conftest의 `_disable_rate_limit`).
 
 ## 8. AI팀 연동 방식
 
 AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은
-함수 일곱 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
+함수 아홉 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
 
 ```python
 from paper_assistant import (
-    analyze, get_paper_detail, get_paper_reviews, get_paper_revisions,
-    get_paper_story, list_papers, extract_pdf_title_abstract)
+    analyze, warmup, get_paper_detail, get_paper_reviews, get_paper_revisions,
+    get_paper_story, list_papers, extract_pdf_title_abstract, pdf_page_count)
 
 report   = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report
+warmup()                                     # 기동 시 SPECTER2 선로드 (선택)
 detail   = get_paper_detail(paper_id)        # -> PaperDetail | None    (DB만)
 reviews  = get_paper_reviews(paper_id)       # -> list[ReviewDetail] | None
 revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API)
 story    = get_paper_story(paper_id, use_llm=None, refresh=False)
                                              # -> PaperStory | None (외부 API + LLM)
 listing  = list_papers(venue=..., year=..., field=..., q=..., limit=, offset=)
-title, abstract = extract_pdf_title_abstract(pdf_bytes)   # PDF 업로드 경로용
+pages    = pdf_page_count(pdf_bytes)         # 추출 전 페이지 상한 검사용 (싸다)
+title, abstract = extract_pdf_title_abstract(pdf_bytes, use_llm=None)  # 업로드 경로용
 ```
 
 무거운 의존성(torch 등)은 서버 기동이 아니라 **첫 호출 때** 로드되도록 전부 지연
 import입니다 — `import paper_assistant` 자체는 가볍습니다.
+
+⚠️ **이 목록 밖의 내부 모듈을 `app/`에서 import하지 마세요.** 예외는 타입을 위한
+`paper_assistant.schemas`와 공유 설정인 `paper_assistant.config` 둘뿐이고,
+`tests/meta/test_package_boundary.py`가 이를 강제합니다. 필요한 기능이 목록에 없으면
+내부 모듈을 찌르지 말고 `__init__.py`에 공개 함수를 추가하세요 — LLM 인스턴스나 그래프
+컴파일 같은 내부 결정이 백엔드로 새면, AI 파트를 고칠 때 `app/`이 함께 깨집니다.
 
 - `get_paper_revisions()`만 **외부 네트워크(OpenReview API)** 를 탑니다. papers 테이블은
   openreview_id로 upsert해서 최신 버전만 남기 때문에 과거 버전이 DB에 없습니다.

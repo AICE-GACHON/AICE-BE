@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.models.analysis import ReviewPrediction
-from app.routers.submissions import STALE_AFTER, _now
+from app.services.analysis import STALE_AFTER, _now
 from tests.app.conftest import upload_pdf
 
 

@@ -234,7 +234,7 @@ def _render_pages(pdf_bytes: bytes, pages: int = _VISION_PAGES,
 
 def _from_page_images(pdf_bytes: bytes, llm) -> tuple[str, str]:
     """페이지 그림을 Haiku 비전에 읽혀 (title, abstract)를 복원한다."""
-    from paper_assistant.graph.llm import HAIKU
+    from paper_assistant.llm import HAIKU
 
     images = _render_pages(pdf_bytes)
     if not images:
@@ -286,7 +286,7 @@ def extract_title_abstract(pdf_bytes: bytes, llm=None) -> tuple[str, str]:
         return (v_title or title).strip(), (v_abstract or abstract).strip()
 
     # 텍스트가 멀쩡한 정상 경로 — 정제만 한다.
-    from paper_assistant.graph.llm import HAIKU
+    from paper_assistant.llm import HAIKU
 
     system = (
         "You are given the title and abstract extracted from an academic PDF, "

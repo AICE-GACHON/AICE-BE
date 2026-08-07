@@ -160,7 +160,7 @@ def test_all_candidates_are_offered_to_the_model():
 
 def test_effort_is_higher_than_the_synthesis_step():
     """재정렬에서 LLM은 판정자 본인이다 — 여기서 아끼면 개편의 근거가 없어진다."""
-    from paper_assistant.graph.llm import RERANK_EFFORT, SONNET_EFFORT
+    from paper_assistant.llm import RERANK_EFFORT, SONNET_EFFORT
 
     order = ["low", "medium", "high", "xhigh", "max"]
     assert order.index(RERANK_EFFORT) > order.index(SONNET_EFFORT)
@@ -184,7 +184,7 @@ def test_every_llm_call_path_logs_usage():
     """
     import inspect as _i
 
-    from paper_assistant.graph.llm import ClaudeLLM
+    from paper_assistant.llm import ClaudeLLM
 
     for name in ("text", "structured_with_pdf"):
         src = _i.getsource(getattr(ClaudeLLM, name))
