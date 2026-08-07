@@ -6,3 +6,29 @@
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+# 저장소가 지원한다고 말한 최저 버전 (README). 문법 규칙이 이 기준으로 판정된다.
+target-version = "py313"
+line-length = 100
+exclude = ["venv", "data", "alembic/versions/__pycache__"]
+
+[tool.ruff.lint]
+# **의도적으로 좁게 시작한다.** 넓게 켜면 첫날부터 224건이 뜨고, 그러면 CI가
+# 빨간 채로 방치되다가 아무도 안 보게 된다. 여기 있는 것들은 전부 "돌려보기 전에는
+# 모르는 진짜 버그" 계열이다 — 실제로 F821이 3.13에서 import를 깨뜨리던
+# paper_assistant/schemas.py의 전방 참조를 잡아냈다.
+#
+#   E4  import 관련  |  E7 문장 구성  |  E9 문법/IO 오류
+#   F   pyflakes (미정의 이름, 미사용 import, f-string 오타 등)
+#   W6  폐기 예정 문법 (잘못된 이스케이프 시퀀스 등)
+#
+# 스타일 규칙(I 정렬, UP 현대화, B 버그베어)은 일부러 뺐다. 켜려면 먼저
+# `ruff check --select I --fix` 로 한 번에 정리하는 별도 커밋을 만들 것 —
+# 기능 변경 커밋에 40개 파일 import 재정렬이 섞이면 리뷰가 불가능해진다.
+select = ["E4", "E7", "E9", "F", "W6"]
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트는 pytest.importorskip 으로 의존성을 먼저 확인한 뒤 import 하는 구조라
+# "import가 파일 맨 위에 없다"(E402)가 정상이다.
+"tests/**" = ["E402"]

@@ -5,10 +5,35 @@
 **AICE**는 ML/AI 논문을 위한 리서치 어시스턴트입니다. 백엔드(FastAPI)와 AI 분석
 파이프라인이 **한 저장소, 한 프로세스, 한 DB**로 통합돼 있습니다.
 
-사용자가 자신의 논문 초안을 올리면, 비슷한 기존 논문을 찾아 그 논문들이 실제로 받았던
-리뷰를 분석해서 "이 연구가 어떤 지적을 받을지, 어느 학회에서 어떤 평가를 받았는지"를
-근거와 함께 제시합니다. 예상 결과가 정답처럼 보이지 않도록, 항상 어떤 유사 논문·리뷰를
-근거로 삼았는지와 **그 결과를 믿어도 되는지(신뢰도)** 를 함께 노출하는 것이 설계 원칙입니다.
+사용자가 자신의 논문을 올리면, 비슷한 기존 논문을 찾아 **"그 논문들이 실제로 어떤 지적을
+받았는지"** 를 리뷰 원문과 함께 보여줍니다.
+
+**예측이 아니라 열람입니다.** 유사 논문으로 지적 범주를 *예측*하는 것은 '검색 없음'
+베이스라인에 졌지만(설계서 §24), 구체적인 지적 *문장*을 근거로 가져오는 것은 잘 됩니다.
+그래서 제품이 하는 말은 "당신은 X를 지적받을 것입니다"가 아니라 **"비슷한 논문들은 이런
+지적을 받았습니다"** 입니다. 이 경계는 API 응답 필드부터 화면 문구까지 전부 지켜져야 합니다.
+
+결과가 정답처럼 보이지 않도록, 항상 어떤 유사 논문·리뷰를 근거로 삼았는지와 **그 결과를
+믿어도 되는지(신뢰도)** 를 함께 노출하는 것이 설계 원칙입니다.
+
+### 파이프라인 2단계 개편 (2026-08-06 완료)
+
+유사 논문 선정을 검색 1단계에서 **검색 + LLM 판정 2단계**로 바꿨습니다. 설계 근거와
+실측 수치는 [추천_파이프라인_재설계.md](추천_파이프라인_재설계.md)에 있습니다.
+
+| 영역 | 무엇이 바뀌었나 |
+|---|---|
+| 입력 | **PDF 전용.** `POST /api/submissions`(JSON) 삭제, 추출 실패 시 422, 60p 초과 거부 |
+| 검색 | 후보 20편 → **50편**, 리뷰 보유 논문(43,034편)만, `CANDIDATE_POOL` 50 → 100 |
+| 선정 | **LLM 재정렬 신설** — PDF 원본 + 후보 50편을 Sonnet 5에 넘겨 최대 5편 (`effort=high`) |
+| 조회 | 선정 5편의 **리뷰 전문·AC 총평·평점**을 Report에 함께 실음 |
+| 분석 | **통계 레이어 제거** — `review_patterns`·`venue_trends`·`rating_context`·`resubmission_flows` |
+| 저장 | `submissions.pdf_bytes`(deferred)·`page_count`, `similar_paper_matches`에 선정 결과 (alembic 0011) |
+| 비용 | 분석 1회 약 **$0.30** (Sonnet 5 도입가, 26p PDF 기준. 2026-09-01부터 약 1.5배) |
+
+**남은 것**: `eval_retrieval.py`가 재던 aspect 예측이 목표에서 빠졌고 그 자리를 채울
+자동 평가가 없습니다. 그리고 실호출에서 LLM이 검색 **47위**를 고른 사례가 나와
+후보 50편이 모자랄 가능성이 열려 있습니다 (재설계 문서 §4.4.1, §8).
 
 ## 2. 기술 스택
 
@@ -48,20 +73,22 @@ AICE/
 │   ├── routers/
 │   │   ├── auth.py               # 회원가입/로그인/구글 로그인/refresh/logout
 │   │   ├── user.py               # 내 정보 조회/수정/탈퇴, 온보딩 조회
-│   │   ├── submissions.py        # 내 초안 업로드(JSON/PDF)·조회·삭제 + 분석 시작/조회 (핵심)
+│   │   ├── submissions.py        # 내 논문 업로드(PDF)·조회·삭제 + 분석 시작/조회 (핵심)
 │   │   ├── corpus.py             # 코퍼스 논문 목록/상세/리뷰/수정 이력 (AI 파트 위임)
 │   │   └── onboarding.py         # 회원가입 전 익명 온보딩 답변 저장
 │   ├── schemas/                # Pydantic 요청/응답 스키마
 │   │   ├── common.py             # ApiResponse[T]
 │   │   ├── auth.py / submission.py / analysis.py
 │   │   └── corpus.py             # AI 파트 스키마 재수출 (중복 정의 금지)
-│   └── services/
+│   └── services/               # 도메인 규칙 — 라우터에는 HTTP 관심사만 남긴다
+│       ├── submissions.py        # 업로드 검증(용량·페이지·길이)·추출·저장, 소유권
 │       └── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
-├── paper_assistant/          # AI 파트 (공개 API 6개)
+├── paper_assistant/          # AI 파트 (공개 API 9개)
 │   ├── config.py               # ★ 공유 환경설정의 단일 소스
 │   ├── schemas.py              # Report 등 통합 계약 스키마
-│   ├── query/                  # 조회 전용 (detail, revisions)
-│   ├── graph/                  # LangGraph 고정 DAG (분석 노드들)
+│   ├── llm.py                  # Claude 래퍼 — graph/·query/·pdf/가 함께 쓴다
+│   ├── query/                  # 조회 전용 (detail, revisions, journey/timeline/narrative/story)
+│   ├── graph/                  # LangGraph 고정 DAG (input→retrieval→llm_rerank→review_fetch→synthesis)
 │   ├── retrieval/              # 하이브리드 검색 (벡터 + 전문검색 RRF)
 │   ├── embedding/              # SPECTER2
 │   ├── ingest/                 # OpenReview 수집 + 정규화 + arXiv/S2 보강
@@ -70,11 +97,11 @@ AICE/
 │   └── db/                     # 커넥션 풀 + 적재 + 코퍼스 통계 캐시(stats.py)
 ├── scripts/                  # 코퍼스 스키마(init_db.sql) + 운영 배치 + cleanup_stale_onboarding.py
 ├── tests/
-│   ├── app/                    # 백엔드 (인증·소유권·분석 상태 전이)
+│   ├── app/                    # 백엔드 (인증·구글 로그인·소유권·분석 상태 전이)
 │   ├── paper_assistant/        # AI 파트
-│   └── test_backend_auth.py    # 백엔드 인증/온보딩 연동 라우터 테스트
+│   └── meta/                   # 설정·경계 드리프트 (소스만 읽으므로 DB 불필요)
 ├── docs/                     # 설계서·팀 공유 문서·개발 문서
-├── alembic/versions/         # 0001 초기 테이블 … 0006 openreview_id unique (아래 §4 참고)
+├── alembic/versions/         # 0001 초기 테이블 … 0011 PDF 저장 + LLM 선정 (아래 §4 참고)
 ├── docker-compose.yml        # pgvector Postgres (포트 5433)
 ├── pyproject.toml            # pytest 설정 (pythonpath)
 ├── requirements.txt          # 런타임 의존성
@@ -91,7 +118,7 @@ DB는 하나지만 **소유자가 둘로 나뉩니다.** 이 경계를 넘지 �
 users ──< submissions                     papers ──< reviews ──< review_points
   │           │                             │  └──< paper_authors >── authors
   │           └──< review_predictions       │  └──< submission_links (재투고 흐름)
-  │                     │                   venue_stats, aspect_base_rates, citations
+  │                     │                   venue_stats, aspect_base_rates, ingest_status
   │                     └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
   └──< onboarding_profiles (1:1, user_id nullable — 회원가입 전엔 주인 없음)
 ```
@@ -105,10 +132,17 @@ users ──< submissions                     papers ──< reviews ──< rev
   `token_version`은 refresh_token 폐기용 버전 카운터로, 로그아웃 시 증가시켜 그
   이전에 발급된 refresh_token을 전부 무효화합니다
   (`alembic/versions/0003_add_user_token_version.py`).
-- **submissions**: 사용자가 올린 내 논문 초안. 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
+- **submissions**: 사용자가 올린 내 논문. **PDF 원본을 `pdf_bytes`에 저장합니다** —
+  분석이 BackgroundTasks라 응답 이후에 도는데, 2단계 LLM이 본문·참고문헌을 봐야 하기
+  때문입니다. ⚠️ `deferred=True`로 매핑돼 있습니다(최대 20MB 블롭이라, 아니면 목록
+  조회가 행마다 이걸 끌어옵니다). 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
   결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
-- **similar_paper_matches**: 그 분석이 근거로 삼은 유사 논문 목록 (`rank`, `match_type`).
+- **similar_paper_matches**: 검색 후보 **50편 전부**와 그중 LLM이 고른 것
+  (`rank`=검색 순위, `selected`, `llm_rank`=화면 순서, `selection_reason`).
+  후보까지 남기는 이유는 **"검색이 뽑은 것"과 "LLM이 고른 것"의 관계가 이 파이프라인의
+  품질 지표**이기 때문입니다 — 유사도에는 사람 라벨 없는 정답지가 없어서, 실사용에서
+  모이는 이 신호가 현실적으로 유일한 대규모 평가 데이터입니다.
 - **onboarding_profiles**: 회원가입 전 익명 상태에서 저장하는 온보딩 답변. `user_id`는
   처음엔 null이고, 회원가입 요청(`SignupRequest.onboarding_id`)이 이 id를 실어 보내면
   그때 연결됩니다 — 세션 쿠키 없이 스테이트리스 구조를 유지하기 위한 설계입니다
@@ -120,8 +154,16 @@ users ──< submissions                     papers ──< reviews ──< rev
 - **papers / reviews / review_points**: ICLR 2020–2025 + NeurIPS 2021–2024에서 수집한
   논문·리뷰·개별 지적 항목 (리뷰 168,217건, 지적항목 119만 건).
 - **venue_stats / aspect_base_rates**: 학회별 점수 기준선과 코퍼스 전체 지적 비율.
-  "이 지적이 이 주제에서 특별히 두드러지는가"를 판단하는 분모입니다.
-- **submission_links**: 같은 논문의 재투고 추적 (ICLR reject → NeurIPS accept).
+  ⚠️ **분석 경로는 더 이상 읽지 않습니다**(통계 레이어 제거). `venue_stats`는 `/story`가,
+  `aspect_base_rates`는 `scripts/eval_retrieval.py`가 쓰므로 남겨 뒀습니다.
+- **submission_links**: 같은 논문의 재투고 추적 (ICLR reject → NeurIPS accept). 747건.
+- **arXiv/S2 보강 필드** (`papers.arxiv_id`·`s2_paper_id`·`citation_count`):
+  2026-08-02에 채웠습니다(설계서 §25). **코퍼스 전체를 덮지 않습니다** —
+  `s2_paper_id` 기준 채택 논문 98.1% / 탈락 논문 38.2%이고, 전체로는 69.5%입니다.
+  `citation_count`는 `citation_percentile`(같은 연도 내 백분위, alembic 0010)로
+  환산되어 검색 랭킹에 실제로 반영됩니다 — 결측이면 중립값 0.5로 대체합니다.
+  아무도 읽지 않던 `final_venue`·`authors.s2_author_id`·`citations`는 alembic
+  0012에서 제거했습니다(아래 표).
 
 코퍼스 테이블에는 SQLAlchemy 모델이 없습니다. `alembic/env.py`의 `CORPUS_TABLES`가
 autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을 만들어도 코퍼스를 건드리지
@@ -135,6 +177,27 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 | `similar_paper_matches.similarity_score` | 논문별 유사도 점수는 만들 수 없음 (아래 6번) → `rank` + `match_type`으로 대체 |
 | `submissions.embedding` | 저장하려면 vector(768)이어야 하는데, 재사용 이득보다 스키마 결합이 큼 |
 
+### 스키마 전수 조사로 걷어낸 것 (alembic 0012, 2026-08-07)
+판정 기준은 **SELECT 하는 코드가 저장소에 있는가** 하나였습니다. 읽는 쪽이 없으면
+채우는 비용만 나가고, 다음 사람이 "이미 채워진 줄 알고" 읽으려 듭니다.
+
+| 대상 | 이유 |
+|---|---|
+| `submissions.content` | 텍스트 붙여넣기 경로가 사라진 뒤 항상 NULL. ⚠️ **`SubmissionResponse`에서 필드가 없어졌습니다** — 프론트가 읽고 있었다면 지우세요 |
+| `reviews.raw_content` | 선언만 있고 INSERT된 적이 없음 |
+| `reviews.points_extracted` + `reviews_pending` 인덱스 | true로 세팅만 하고 WHERE에 쓰는 곳이 없음. 수집 재개는 `ingest_status`가 담당 |
+| `review_points.embedding` | 지적항목은 쿼리 시점에 임베딩하므로(§13) 늘 NULL |
+| `citations` 테이블 | 적재 코드만 있고 조회가 0건. 인용 그래프를 쓸 계획 없음 (실측 0행) |
+| `papers.final_venue` | 같은 개념을 `query/journey.py`가 `submission_links`로 계산함. 컬럼 쪽은 소비자 없음 (25,426행 폐기) |
+| `authors.s2_author_id` + `authors_s2` 인덱스 | 성(姓) 매칭으로 채웠지만 읽는 곳 없음 (57,910행 폐기) |
+| `similar_paper_matches_selected` 인덱스 | 0011이 "선정 5편만 꺼내는 조회"용으로 만들었지만, 유일한 조회 `matches_for()`에 `WHERE selected`가 없어 쓰일 수 없었음 |
+| `similar_paper_matches_paper` 인덱스 | `paper_id`로 거르는 쿼리가 없음 |
+| `papers_decision` 인덱스 | `WHERE decision` 술어가 없고 값이 9종뿐이라 플래너가 고르지 않음 |
+
+`final_venue`·`s2_author_id`는 S2 호출로 채운 실데이터를 버립니다. 되살리려면
+`s2_enricher`를 다시 돌려야 하고 API 호출이 다시 듭니다(그래서 downgrade는 컬럼만
+되돌리고 값은 NULL입니다).
+
 ## 5. 로컬 실행 방법
 
 [README.md](README.md)의 "로컬 실행"을 따르세요. 기존과 달라진 점만 요약하면:
@@ -144,10 +207,22 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 - `alembic upgrade head`는 서비스 테이블 5개(`users`, `submissions`,
   `review_predictions`, `similar_paper_matches`, `onboarding_profiles`)만 만듭니다.
 
-## 6. 프론트/백엔드가 반드시 지켜야 할 4가지
+## 6. 프론트/백엔드가 반드시 지켜야 할 것
 
 AI 파트가 실측으로 확인한 함정입니다. 전부 실제로 부딪혀서 고친 것들이라, `Report`를
 화면에 옮길 때 같은 실수를 반복하지 않으려면 이 절만은 읽어야 합니다.
+
+### 먼저 — 이 서비스가 할 수 있는 말
+
+**예측형 문구를 쓰면 안 됩니다.** "이런 지적을 받을 것입니다", "예상 리뷰", "당신의
+논문은 novelty가 약하다고 평가될 것입니다" 같은 표현은 데이터가 뒷받침하지 않습니다(§24).
+**주어는 항상 유사 논문입니다** — "비슷한 논문 N편은 이런 지적을 받았습니다".
+
+이건 표현의 문제가 아니라 무엇이 검증됐는지의 문제입니다. 지적 *범주* 예측은 '검색 없음'
+베이스라인에 0.66~0.78배로 졌고, 잘 되는 것은 구체적인 지적 *문장*을 근거로 가져오는
+쪽입니다. 화면이 예측을 약속하면 검증되지 않은 것을 파는 것이 됩니다.
+
+### 그다음 네 가지 — 숫자를 화면에 옮길 때
 
 **① 유사도 점수는 만들 수 없습니다.**
 SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 안 됩니다 — 1위든 20위든
@@ -159,21 +234,23 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 논문 개별 점수는 못 갈라도, 쿼리가 우리 도메인(ML/AI 논문) 안에 있는지는 뚜렷합니다 —
 도메인 안은 top-5 평균 코사인 **0.946~0.966**, 밖은 **0.852~0.867**로 겹치지 않습니다.
 → `confidence.level`(strong/moderate/weak)과 `is_reliable`을 확인해 **`weak`이면 경고
-배너가 필수**입니다. 없으면 요리 레시피를 넣어도 ML 논문 20편을 자신 있게 내놓습니다.
+배너가 필수**입니다. 없으면 요리 레시피를 넣어도 ML 논문을 자신 있게 내놓습니다.
+`weak`이면 LLM 재정렬 자체를 건너뛰므로 `selected_papers`도 비어 옵니다.
 
-**③ 리뷰 지적은 빈도순으로 세우면 안 됩니다.**
-"20편 중 17편이 baselines 지적"은 중요해 보이지만, 코퍼스 전체의 **78.8%**가 같은 지적을
-받습니다 — 정보량이 사실상 0입니다.
-→ `ReviewPattern`의 `lift`(코퍼스 평균 대비), `is_distinctive`, 그리고 그 지적을 받은 논문
-vs 안 받은 논문의 당락 차이(`is_contrast_significant`) 기준으로 강조하세요.
+**③ `selected_papers`가 결과이고 `similar_papers`는 후보 풀입니다.**
+후보 50편은 근거 추적용 기록이지 "유사 논문 목록"이 아닙니다. 특히 `selected_papers`가
+**비어 있을 때 후보로 채우면 안 됩니다** — 본문까지 대조해 비슷하지 않다고 판정한
+결과이고, 채우는 순간 "비슷한 논문이 받은 리뷰"라는 약속이 거짓이 됩니다.
+→ 화면은 `selected_papers`만 그리고, 후보는 접어서 "여기 있다고 비슷한 논문은 아니다"를
+명시하세요.
 
-**④ 점수·채택률은 절대값으로 보여주면 안 됩니다.**
-- 척도가 학회마다 다릅니다 (ICLR 2020만 1~8점, 나머지는 1~10점).
-- NeurIPS는 OpenReview가 채택 논문 위주로만 공개해 코퍼스의 **95%가 accept로 보이지만
-  실제 채택률은 ~25%**입니다.
-→ `rating_vs_venue`(학회 평균 대비), `rating_vs_threshold`(당락 경계 대비),
-`accept_lift`(코퍼스 대비) 같은 **상대값**만 씁니다. `is_coverage_biased`가 true인
-학회는 채택률 절대 수치를 노출하지 마세요.
+**④ 리뷰 점수는 논문끼리 비교하면 안 되고, 미분리 리뷰는 '지적'이 아닙니다.**
+- 척도가 학회마다 다릅니다 (ICLR 2020만 1~8점, 나머지는 1~10점). `avg_rating`을
+  논문 간에 비교하지 마세요. 쓸 수 있는 것은 `rating_spread`(크면 리뷰어 의견이 갈림)입니다.
+- **`reviews[].is_unsplit`이 참이면 `weaknesses`에 리뷰 본문 전체가 들어 있습니다.**
+  2023년 이전 학회가 전부 여기 해당하고, '지적받은 점'이라 라벨을 붙이면 리뷰 전체가
+  지적으로 둔갑합니다 — '리뷰 본문'으로 한 덩어리 표시하세요.
+- 5편으로 채택률을 계산하지 마세요. 유사도로 고른 5편은 어떤 것의 표본도 아닙니다.
 
 ## 7. 구현 완료 API 목록
 
@@ -191,8 +268,7 @@ vs 안 받은 논문의 당락 차이(`is_contrast_significant`) 기준으로 �
 | User | `PATCH /api/user/me` | 내 정보 수정 (nickname, openreview_id) | 필요 |
 | User | `DELETE /api/user/me` | 회원 탈퇴 (submissions 이하 CASCADE 삭제) | 필요 |
 | User | `GET /api/user/me/onboarding` | 내 온보딩 답변 조회 (마이페이지) | 필요 |
-| Submission | `POST /api/submissions` | 내 논문 초안 업로드 (JSON) | 필요 |
-| Submission | `POST /api/submissions/pdf` | 내 논문 초안 업로드 (PDF, title/abstract 비면 추출) | 필요 |
+| Submission | `POST /api/submissions/pdf` | 내 논문 업로드 — **유일한 입력 경로**. title/abstract가 비면 PDF에서 추출, 응답에 `page_count`. 추출 실패·60p 초과는 422, **20MB 초과는 413** | 필요 |
 | Submission | `GET /api/submissions` | 내 초안 목록 (최신순, 본문 제외) | 필요 |
 | Submission | `GET /api/submissions/{id}` | 초안 상세 | 필요 |
 | Submission | `DELETE /api/submissions/{id}` | 초안 삭제 (분석 결과도 함께) → **204** | 필요 |
@@ -201,7 +277,8 @@ vs 안 받은 논문의 당락 차이(`is_contrast_significant`) 기준으로 �
 | Corpus | `GET /api/papers` | 코퍼스 논문 목록 (venue/year/field/q 필터, limit/offset 페이지네이션) | - |
 | Corpus | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Corpus | `GET /api/papers/{paper_id}/reviews` | 그 논문의 리뷰 목록 | - |
-| Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**) | - |
+| Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**). IP 기준 **30회/시간** | - |
+| Corpus | `GET /api/papers/{paper_id}/story` | 심사 서사 — 재투고 궤적 + 리뷰·응답·수정 타임라인 + 요약 (**외부 API + LLM**, `paper_stories`에 캐시). IP 기준 **30회/시간**, `refresh=true`는 **로그인 필요** | -<br>(refresh만 필요) |
 | Onboarding | `POST /api/onboarding` | 회원가입 전 익명 온보딩 답변 저장 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
@@ -222,36 +299,80 @@ refresh_token은 JWT라 상태가 없어 개별 폐기가 불가능합니다. �
 
 인증 없이 열려 있는 엔드포인트(signup/login/google/refresh/onboarding)는 IP 기준
 rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signup/login/google
-10/분, refresh 20/분, onboarding 5/분. 저장소가 메모리라 워커를 여러 개로 늘리면
+10/분, refresh 20/분, onboarding 5/분.
+
+**`/papers/{id}/revisions`와 `/papers/{id}/story`도 30회/시간으로 묶여 있습니다.**
+이 둘만 외부 자원을 쓰기 때문입니다(OpenReview 2콜, `/story`는 LLM까지). 인증을 걸지
+않은 이유는 랜딩의 데모가 비로그인으로 `/story`를 부르기 때문이고, 캐시된 논문을 다시
+읽는 것은 DB 조회 1번이라 비용이 없습니다 — 막아야 할 것은 **캐시에 없는 논문을 연달아
+훑는 것**이라 시간당 상한이 맞습니다.
+
+⚠️ **`refresh=true`만 로그인을 요구합니다.** 캐시를 우회하므로 같은 논문에 반복하면
+시간당 상한을 무의미하게 만들고 호출마다 LLM이 돕니다. 비로그인 요청은 조용히 캐시를
+주지 않고 **401로 거절**합니다 — 조용히 주면 호출자가 방금 다시 만든 결과를 받았다고
+오해합니다. 저장소가 메모리라 워커를 여러 개로 늘리면
 워커별로 따로 세므로, 그때는 Redis 저장소로 바꿔야 합니다. 백엔드 테스트
-(`tests/test_backend_auth.py`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다.
+(`tests/app/`)는 반복 호출 때문에 이 제한을 꺼두고 돕니다 (conftest의 `_disable_rate_limit`).
 
 ## 8. AI팀 연동 방식
 
 AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은
-함수 여섯 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
+함수 아홉 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
 
 ```python
 from paper_assistant import (
-    analyze, get_paper_detail, get_paper_reviews, get_paper_revisions,
-    list_papers, extract_pdf_title_abstract)
+    analyze, warmup, get_paper_detail, get_paper_reviews, get_paper_revisions,
+    get_paper_story, list_papers, extract_pdf_title_abstract, pdf_page_count)
 
 report   = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report
+warmup()                                     # 기동 시 SPECTER2 선로드 (선택)
 detail   = get_paper_detail(paper_id)        # -> PaperDetail | None    (DB만)
 reviews  = get_paper_reviews(paper_id)       # -> list[ReviewDetail] | None
 revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API)
+story    = get_paper_story(paper_id, use_llm=None, refresh=False)
+                                             # -> PaperStory | None (외부 API + LLM)
 listing  = list_papers(venue=..., year=..., field=..., q=..., limit=, offset=)
-title, abstract = extract_pdf_title_abstract(pdf_bytes)   # PDF 업로드 경로용
+pages    = pdf_page_count(pdf_bytes)         # 추출 전 페이지 상한 검사용 (싸다)
+title, abstract = extract_pdf_title_abstract(pdf_bytes, use_llm=None)  # 업로드 경로용
 ```
 
 무거운 의존성(torch 등)은 서버 기동이 아니라 **첫 호출 때** 로드되도록 전부 지연
 import입니다 — `import paper_assistant` 자체는 가볍습니다.
+
+⚠️ **이 목록 밖의 내부 모듈을 `app/`에서 import하지 마세요.** 예외는 타입을 위한
+`paper_assistant.schemas`와 공유 설정인 `paper_assistant.config` 둘뿐이고,
+`tests/meta/test_package_boundary.py`가 이를 강제합니다. 필요한 기능이 목록에 없으면
+내부 모듈을 찌르지 말고 `__init__.py`에 공개 함수를 추가하세요 — LLM 인스턴스나 그래프
+컴파일 같은 내부 결정이 백엔드로 새면, AI 파트를 고칠 때 `app/`이 함께 깨집니다.
 
 - `get_paper_revisions()`만 **외부 네트워크(OpenReview API)** 를 탑니다. papers 테이블은
   openreview_id로 upsert해서 최신 버전만 남기 때문에 과거 버전이 DB에 없습니다.
   느리고 실패할 수 있으므로 사용자가 명시적으로 요청했을 때만 호출합니다.
   `supported=false`는 "수정이 없었다"가 아니라 "볼 수 없다"는 뜻이며(2023년 이전 학회는
   저자 수정 이력을 공개하지 않음), 이때 `message`를 그대로 사용자에게 보여주면 됩니다.
+
+- `get_paper_story()`는 위 조회들을 **시간축으로 엮은** 것입니다. 세 부분(`journey` /
+  `timeline` / `narrative`)이 서로 **독립적으로 실패**하도록 만들었습니다 — 외부 API가
+  죽어도 `journey`(DB만 조회)는 나가고, LLM이 꺼져 있어도 `timeline`은 나갑니다. 한
+  부분이 비었다고 전체를 실패로 처리하지 마세요.
+
+  실측으로 확인한 한계 세 가지가 있고, 전부 `caveats`에 사용자용 문구로 들어갑니다:
+
+  1. **리뷰 본문·점수는 최종 수정본입니다.** 리뷰어가 저자 응답 이후 리뷰를 고쳤어도
+     우리가 가진 건 고쳐진 뒤의 내용뿐인데, 그걸 최초 게시 시각에 붙여 보여주게 됩니다.
+     수정 전 점수는 복원할 수 없습니다 — 리뷰 노트의 edit 이력에서 첫 edit은 content가
+     빈 채로 내려옵니다(표본 3건 전부). 그래서 **"6점 → 7점" 같은 표시를 만들면 안
+     되고**, 수정이 있었다는 사실만 `review_update` 이벤트로 옵니다.
+  2. **저자 수정으로 볼 수 있는 건 제목·초록·첨부파일까지입니다.** 본문은 PDF 안이라
+     읽을 수 없으므로 "실험을 추가했다"는 화면에서 단정하면 안 됩니다. LLM 프롬프트에도
+     같은 제약을 걸어 뒀습니다("~하겠다고 답변함"까지만 쓰게).
+  3. **v2 학회인데도 수정 이력이 안 열리는 경우가 흔합니다** (무작위 14편 중 저자
+     수정본이 보인 건 3편, ICLR 2024·NeurIPS는 대개 게재 확정본만). 이걸 "수정 없음"
+     으로 그리지 마세요.
+
+  반대로 **2023년 이전 학회도 리뷰·저자 응답 타임라인은 나옵니다** (ICLR 2022 실측:
+  리뷰 4건 + 저자 응답 8건). `/revisions`가 `supported=false`로 아무것도 주지 못하던
+  구간이라, 구 학회 논문은 `/story` 쪽이 훨씬 많은 것을 보여줍니다.
 
 - `analyze()`는 **stateless**입니다 — DB에 아무것도 쓰지 않고 `Report`만 돌려줍니다.
   결과를 사용자·submission에 묶어 저장하는 건 `app/services/analysis.py`의 몫입니다.
@@ -270,15 +391,17 @@ import입니다 — `import paper_assistant` 자체는 가볍습니다.
 | 필드 | 내용 |
 |---|---|
 | `confidence` | 이 검색 결과를 믿어도 되는지 (strong/moderate/weak) |
-| `similar_papers` | 유사 논문 20편 — rank, match_type, 리뷰 점수(상대값) |
-| `review_patterns` | 반복 등장 지적 — lift, p값, 이 지적을 받은/안 받은 논문의 당락 대조 |
-| `venue_trends` | 학회별 게재 경향 (`is_coverage_biased` 확인 필수) |
-| `rating_context` | 이웃 논문 점수 분포와 당락 경계 추정 |
-| `resubmission_flows` | A학회 reject → B학회 accept 흐름 |
+| `selected_papers` | **화면의 주인공.** LLM이 고른 최대 5편 — 선정 이유, 리뷰 전문, AC 총평, 평점 |
+| `similar_papers` | 검색 후보 50편 — rank(검색 순위), match_type. **근거 추적용이지 결과가 아님** |
 | `summary_markdown` | 사람이 읽는 종합 요약. `[E1]`/`[M1]`은 아래 evidence를 가리킴 |
 | `evidence` | 인용 가능한 **검색된 원문** — 리뷰 지적 문장(E*) + AC 메타리뷰(M*) |
 | `citations` | 요약이 실제로 인용한 라벨. 지어낸 라벨은 제거되므로 링크는 유효하다 (원문이 그 주장을 뒷받침하는지까지는 미검증) |
 | `used_llm` | 이 리포트가 실제 LLM 호출로 만들어졌는지 (근거 추적용) |
+
+⚠️ **2026-08-06 개편으로 없어진 필드**: `review_patterns`, `venue_trends`,
+`rating_context`, `resubmission_flows`. 통계 레이어를 통째로 걷어냈습니다 — 5편 위에서는
+lift도 Fisher 검정도 무의미하기 때문입니다. 되살리려면
+[추천_파이프라인_재설계.md](추천_파이프라인_재설계.md) 결정 #1을 먼저 읽으세요.
 
 ## 9. 브랜치 전략
 
@@ -295,7 +418,39 @@ import입니다 — `import paper_assistant` 자체는 가볍습니다.
 - [x] **프론트 연동** — [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React)를
       연결했습니다. 온보딩 → 회원가입(온보딩 연결) → 로그인 → `/api/user/me`까지
       브라우저에서 CORS 포함 확인했고, 이로써 역할이 끝난 `demo/`는 삭제했습니다.
-- [ ] **프론트에 6번 4가지 규칙 반영 확인** — 유사도 점수 미표시, `confidence.level=weak`
-      경고 배너, `is_distinctive` 기준 강조, `is_coverage_biased` 학회 채택률 비노출.
-      아직 화면에서 검증하지 않았습니다.
+- [x] **파이프라인 2단계 개편** — PDF 전용 입력 + LLM 재정렬 + 통계 레이어 제거.
+      2026-08-06 완료 (위 §1 표). 근거와 실측은
+      [추천_파이프라인_재설계.md](추천_파이프라인_재설계.md).
+- [x] **프론트에 6번 규칙 반영** — 예측형 문구를 결과 화면과 랜딩 카피에서 제거,
+      유사도 점수 미표시, `weak` 경고 배너, `is_unsplit` 리뷰를 '리뷰 본문'으로 표시,
+      선정이 비면 후보로 채우지 않음. 브라우저에서 확인했습니다.
+- [ ] ⚠️ **후보 품질 올리기** — 실사용에서 LLM이 검색 33·34·49위를 골랐습니다(49위는
+      경계에서 한 칸). **N은 50으로 고정**하고, 참고문헌 매칭 채널을 넣어 그 논문들이
+      애초에 상위로 올라오게 합니다 (재설계 문서 §9.1).
+- [ ] **"정말 비슷한가"의 자동 평가** — `eval_retrieval.py`가 재던 aspect 예측이
+      목표에서 빠졌고 대체가 없습니다. `similar_paper_matches`에 후보와 선정이 함께
+      쌓이므로, 실사용이 모이면 "LLM이 검색 어디쯤에서 고르는가"부터 SQL로 잴 수 있습니다.
+- [x] **제목 추출 수정** — span을 잇는 기준을 공백+정규식에서 **bbox 좌표**로 바꿨습니다.
+      `L ORA: LOW -RANK ADAPTATION OF LARGE LAN GUAGE MODELS` →
+      `LORA: LOW-RANK ADAPTATION OF LARGE LANGUAGE MODELS`. 소문자 복원은 가능하지만
+      검색 결과가 바뀌지 않아(top-10 일치 10/10) 만들지 않았습니다.
+- [x] **스캔본 대응** — 텍스트 추출이 비거나 깨지면 앞 2페이지를 130dpi PNG로 렌더해
+      Haiku 비전이 읽습니다(`pdf/extract.py`의 `_from_page_images`). 실호출 검증:
+      스캔본으로 구운 LoRA 논문에서 제목·초록 1,388자를 복원, in=3,116/out=381 → **$0.005**.
+      **실패했을 때만** 돌기 때문에 정상 업로드에는 비용이 붙지 않습니다.
+- [x] **arXiv/S2 보강 실행** — 설계서 §20의 파이프라인을 2026-08-02에 전 단계
+      실행했습니다(결과는 §25). alembic `0008`로 `papers.citation_count` 드리프트를
+      먼저 복구해야 했습니다.
+- [x] **보강 필드를 실제로 쓰기** — `citation_count`는 alembic `0010`의
+      `citation_percentile`(같은 연도 내 백분위)로 환산돼 검색 랭킹에 들어갔습니다.
+      소비처를 못 찾은 `final_venue`·`authors.s2_author_id`와 한 번도 적재하지 않은
+      `citations`는 alembic `0012`에서 제거했습니다 — 채우는 비용(S2 호출)만 나가고
+      읽는 쪽이 없는 상태를 유지하지 않기로 했습니다.
+- [x] **코퍼스 중복 — 검색에서 접음** (설계서 §26.5). 실측 302쌍 중 301쌍이
+      NeurIPS 2021이고, **두 행의 리뷰가 하나도 겹치지 않습니다**(쌍당 평균 7.8건).
+      한쪽을 지우면 실제 리뷰 약 1,170건이 사라지므로 **DB는 건드리지 않고**
+      검색에서만 하나로 접습니다(`_pick_without_duplicates`, 리뷰 많은 쪽을 남김).
+- [ ] **중복의 근본 원인 확인** — 왜 NeurIPS 2021만, 왜 21.7%인지. OpenReview API로
+      두 forum이 실제로 존재하는지 봐야 합니다. 저장을 건드리지 않았으므로 밝혀진 뒤에
+      판단하면 됩니다.
 - [ ] 코퍼스 DB 덤프 배포 경로 확정 (수 GB, git 불가).

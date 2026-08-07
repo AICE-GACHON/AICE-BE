@@ -16,6 +16,21 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     return pwd_context.verify(plain_password, password_hash)
 
 
+# 존재하지 않는 계정에도 같은 시간을 쓰기 위한 미끼 해시. 모듈 로드 시 한 번만
+# 만든다 (매 요청 hash()를 부르면 검증보다 오히려 더 느려서 차이가 반대로 난다).
+_DUMMY_HASH = pwd_context.hash("aice-timing-equalizer")
+
+
+def dummy_verify(plain_password: str) -> None:
+    """실패가 확정된 로그인에서도 bcrypt를 한 번 돌려 응답 시간을 맞춘다.
+
+    비밀번호 검증 자체가 느린 연산이라(bcrypt는 일부러 느리다), 계정이 없을 때만
+    그 비용을 건너뛰면 응답 시간이 곧 "이 이메일이 가입돼 있는가"의 답이 된다.
+    routers/auth.py의 login이 이 함수를 부르는 이유다.
+    """
+    pwd_context.verify(plain_password, _DUMMY_HASH)
+
+
 def create_access_token(subject: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {"sub": subject, "exp": expire, "type": "access"}

@@ -16,7 +16,8 @@ SET maintenance_work_mem = '1GB';   -- 인덱스 생성 속도에 직접 영향
 CREATE INDEX IF NOT EXISTS papers_embedding_hnsw
     ON papers USING hnsw (embedding vector_cosine_ops);
 
--- review_points.embedding은 현재 전부 NULL(쿼리 시점 임베딩, §13) →
--- HNSW를 만들어도 빈 인덱스라 무의미하므로 생략. 향후 사전 임베딩 시 추가.
+-- review_points에는 벡터 인덱스가 없다. 지적항목은 쿼리 시점에 임베딩하므로(§13)
+-- 저장할 벡터 자체가 없고, 늘 NULL이던 embedding 컬럼은 alembic 0012에서 지웠다.
+-- 사전 임베딩으로 방향을 바꾸면 컬럼과 HNSW를 함께 되살릴 것.
 
 ANALYZE papers;

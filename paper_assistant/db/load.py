@@ -5,8 +5,6 @@ openreview_id가 자연 키이므로 재실행 시 갱신만 일어난다.
 """
 import logging
 
-from psycopg.types.json import Json
-
 from paper_assistant.db.connection import cursor
 from paper_assistant.ingest.normalize import NormalizedPaper
 
@@ -96,11 +94,13 @@ def upsert_reviews(cur, paper_id: int, paper: NormalizedPaper) -> int:
     return len(paper.reviews)
 
 
-def load_review_points(review_openreview_id: str, points, embeddings=None) -> int:
+def load_review_points(review_openreview_id: str, points) -> int:
     """한 리뷰의 지적 항목을 적재. 재실행 시 기존 항목을 지우고 새로 넣는다.
 
     points: ExtractedPoint 리스트
-    embeddings: 각 point의 벡터 (None이면 임베딩 없이 저장)
+
+    벡터는 받지 않는다 — 지적항목은 설계상 쿼리 시점에 임베딩하므로(설계서 §13)
+    review_points에 벡터 컬럼이 없다 (alembic 0012에서 제거).
     """
     if not points:
         return 0
@@ -116,18 +116,15 @@ def load_review_points(review_openreview_id: str, points, embeddings=None) -> in
         # 멱등성: 이 리뷰의 기존 지적 항목을 먼저 삭제
         cur.execute("DELETE FROM review_points WHERE review_id = %s", (review_id,))
 
-        for i, p in enumerate(points):
-            emb = embeddings[i] if embeddings is not None else None
+        for p in points:
             cur.execute(
                 """
                 INSERT INTO review_points
-                    (review_id, paper_id, aspect, sentiment, text, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (review_id, paper_id, aspect, sentiment, text)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (review_id, paper_id, p.aspect, p.sentiment, p.text, emb),
+                (review_id, paper_id, p.aspect, p.sentiment, p.text),
             )
-        cur.execute(
-            "UPDATE reviews SET points_extracted = true WHERE id = %s", (review_id,))
     return len(points)
 
 

@@ -9,7 +9,8 @@ from app.core.deps import get_current_user
 from app.core.google_oauth import verify_google_id_token
 from app.core.rate_limit import limiter
 from app.core.security import (
-    create_access_token, create_refresh_token, decode_token, hash_password, verify_password,
+    create_access_token, create_refresh_token, decode_token, dummy_verify, hash_password,
+    verify_password,
 )
 from app.database import get_db
 from app.models.onboarding import OnboardingProfile
@@ -28,6 +29,11 @@ _invalid_refresh = HTTPException(
 _duplicate_account = HTTPException(
     status_code=status.HTTP_409_CONFLICT, detail="이미 사용 중인 이메일 또는 OpenReview ID입니다."
 )
+
+# 분당 상한(10/minute)만 있으면 그 아래로 꾸준히 두드리는 무차별 대입은 통과한다 —
+# IP 하나로 하루 14,400번이다. 시간 단위 상한을 겹쳐 그 창을 닫는다. 사람이 로그인을
+# 한 시간에 30번 시도할 일은 없고, 오타로 몇 번 틀리는 정상 사용은 그대로 통과한다.
+_LOGIN_HOURLY_LIMIT = "30/hour"
 
 
 @router.post("/signup", response_model=ApiResponse[UserResponse], status_code=status.HTTP_201_CREATED)
@@ -65,13 +71,26 @@ def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_d
 
 @router.post("/login", response_model=ApiResponse[TokenResponse])
 @limiter.limit("10/minute")
+@limiter.limit(_LOGIN_HOURLY_LIMIT)
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     # password_hash가 없으면 구글 전용 계정 — verify_password에 None을 넘기면
     # passlib이 에러를 던지므로 그 전에 걸러야 한다.
-    if user is None or user.password_hash is None or not verify_password(
-        payload.password, user.password_hash
-    ):
+    if user is None or user.password_hash is None:
+        # 계정이 없거나 비밀번호가 없는 경우에도 bcrypt를 한 번 돌린다.
+        #
+        # 그냥 401을 던지면 응답이 즉시 돌아오고, 실제 계정일 때만 bcrypt 검증
+        # (수십~수백 ms)이 걸린다. 이 차이는 네트워크 너머에서도 안정적으로 측정
+        # 가능해서, 응답 메시지를 아무리 똑같이 맞춰도 **어떤 이메일이 가입돼
+        # 있는지가 그대로 새어 나간다.** 이메일 목록은 그 자체로 표적 피싱과
+        # 크리덴셜 스터핑의 입력이다.
+        dummy_verify(payload.password)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="이메일 또는 비밀번호가 올바르지 않습니다.",
+        )
+
+    if not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="이메일 또는 비밀번호가 올바르지 않습니다.",

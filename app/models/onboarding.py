@@ -32,5 +32,10 @@ class OnboardingProfile(Base):
     stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     venue: Mapped[str | None] = mapped_column(String(100), nullable=True)
     result_order: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    # 다른 서비스 테이블과 같이 TIMESTAMPTZ다 (alembic 0002, 0007). 앱이 만든 값과
+    # DB 서버 시각이 타임존 다른 환경에서 어긋나지 않게 하기 위함.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
+        nullable=False)

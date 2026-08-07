@@ -154,6 +154,41 @@ def _diff_fields(prev: dict, cur: dict,
     return changes
 
 
+def build_revisions(edits: list[dict]) -> list[RevisionEntry]:
+    """edits(시간 오름차순)를 누적 적용해 리비전 목록으로 만든다.
+
+    edit은 부분 패치라 앞에서부터 누적해야 그 시점의 전체 버전이 나온다
+    (모듈 docstring 참고). 네트워크·DB를 타지 않는 순수 함수라 story.py가
+    같은 edits로 타임라인을 만들 때 그대로 재사용한다 — 한쪽만 고쳐서 두 화면의
+    diff가 달라지는 일을 막으려고 여기 하나만 둔다.
+    """
+    out: list[RevisionEntry] = []
+    state: dict[str, str | None] = {}
+    src: dict[str, str] = {}   # 파일 필드 → 그 파일을 실어 나른 edit id
+    for i, edit in enumerate(edits):
+        patch = edit.get("note", {}).get("content") or {}
+        nxt, nxt_src = dict(state), dict(src)
+        for field, _, kind_ in TRACKED:
+            if field not in patch:
+                continue
+            nxt[field] = _unwrap(patch[field])
+            # 값이 있을 때만 출처를 갱신한다 — 삭제 edit에는 받을 파일이 없다
+            if kind_ == "file" and nxt[field]:
+                nxt_src[field] = edit.get("id", "")
+
+        kind, label = _classify(edit.get("invitation", ""))
+        ts = edit.get("tcdate") or edit.get("cdate") or 0
+        out.append(RevisionEntry(
+            revision_id=edit.get("id", ""),
+            kind=kind, kind_label=label, timestamp=ts,
+            date=datetime.fromtimestamp(ts / 1000, KST).strftime("%Y-%m-%d %H:%M"),
+            changes=[] if i == 0 else _diff_fields(state, nxt, src, nxt_src),
+            is_baseline=(i == 0),
+        ))
+        state, src = nxt, nxt_src
+    return out
+
+
 def get_paper_revisions(paper_id: int) -> PaperRevisions | None:
     """paper_id로 OpenReview 수정 이력을 조회한다. 논문이 없으면 None."""
     with cursor() as cur:
@@ -187,28 +222,5 @@ def get_paper_revisions(paper_id: int) -> PaperRevisions | None:
                        "학회가 수정 내역을 비공개로 둔 경우입니다.")
         return out
 
-    state: dict[str, str | None] = {}
-    src: dict[str, str] = {}   # 파일 필드 → 그 파일을 실어 나른 edit id
-    for i, edit in enumerate(edits):
-        patch = edit.get("note", {}).get("content") or {}
-        nxt, nxt_src = dict(state), dict(src)
-        for field, _, kind_ in TRACKED:
-            if field not in patch:
-                continue
-            nxt[field] = _unwrap(patch[field])
-            # 값이 있을 때만 출처를 갱신한다 — 삭제 edit에는 받을 파일이 없다
-            if kind_ == "file" and nxt[field]:
-                nxt_src[field] = edit.get("id", "")
-
-        kind, label = _classify(edit.get("invitation", ""))
-        ts = edit.get("tcdate") or edit.get("cdate") or 0
-        out.revisions.append(RevisionEntry(
-            revision_id=edit.get("id", ""),
-            kind=kind, kind_label=label, timestamp=ts,
-            date=datetime.fromtimestamp(ts / 1000, KST).strftime("%Y-%m-%d %H:%M"),
-            changes=[] if i == 0 else _diff_fields(state, nxt, src, nxt_src),
-            is_baseline=(i == 0),
-        ))
-        state, src = nxt, nxt_src
-
+    out.revisions = build_revisions(edits)
     return out
