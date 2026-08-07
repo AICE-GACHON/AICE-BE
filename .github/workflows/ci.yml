@@ -50,8 +50,14 @@ jobs:
 
       # requirements-dev.txt에 적힌 버전 그대로 쓴다 (`ruff>=0.16` 부분만 잘라냄).
       # 여기에 버전을 또 적으면 두 곳이 조용히 어긋난다.
+      #
+      # ⚠️ 반드시 블록 스칼라(`run: |`)로 둘 것. 한 줄로 적으면 정규식 안의 ` #`을
+      # YAML이 **주석 시작으로 읽어** 명령이 `pip install "$(grep -oE '^ruff[^` 에서
+      # 잘린다. 그러면 bash가 따옴표를 못 닫고 `unexpected EOF`로 죽는다 —
+      # ruff가 실패한 게 아니라 설치 줄이 실행조차 안 된 것이라 로그가 헷갈린다.
       - name: ruff 설치
-        run: pip install "$(grep -oE '^ruff[^ #]*' requirements-dev.txt)"
+        run: |
+          pip install "$(grep -oE '^ruff[^ #]*' requirements-dev.txt)"
 
       - name: ruff check
         run: ruff check .
