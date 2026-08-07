@@ -118,7 +118,7 @@ DB는 하나지만 **소유자가 둘로 나뉩니다.** 이 경계를 넘지 �
 users ──< submissions                     papers ──< reviews ──< review_points
   │           │                             │  └──< paper_authors >── authors
   │           └──< review_predictions       │  └──< submission_links (재투고 흐름)
-  │                     │                   venue_stats, aspect_base_rates, citations
+  │                     │                   venue_stats, aspect_base_rates, ingest_status
   │                     └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
   └──< onboarding_profiles (1:1, user_id nullable — 회원가입 전엔 주인 없음)
 ```
@@ -157,11 +157,13 @@ users ──< submissions                     papers ──< reviews ──< rev
   ⚠️ **분석 경로는 더 이상 읽지 않습니다**(통계 레이어 제거). `venue_stats`는 `/story`가,
   `aspect_base_rates`는 `scripts/eval_retrieval.py`가 쓰므로 남겨 뒀습니다.
 - **submission_links**: 같은 논문의 재투고 추적 (ICLR reject → NeurIPS accept). 747건.
-- **arXiv/S2 보강 필드** (`papers.arxiv_id`·`s2_paper_id`·`citation_count`·`final_venue`,
-  `authors.s2_author_id`): 2026-08-02에 채웠습니다(설계서 §25). **코퍼스 전체를 덮지
-  않습니다** — `s2_paper_id` 기준 채택 논문 98.1% / 탈락 논문 38.2%이고, 전체로는
-  69.5%입니다. **`citation_count`와 `final_venue`는 아직 검색·분석이 읽지 않습니다.**
-  `citations`(인용 엣지)는 0행입니다.
+- **arXiv/S2 보강 필드** (`papers.arxiv_id`·`s2_paper_id`·`citation_count`):
+  2026-08-02에 채웠습니다(설계서 §25). **코퍼스 전체를 덮지 않습니다** —
+  `s2_paper_id` 기준 채택 논문 98.1% / 탈락 논문 38.2%이고, 전체로는 69.5%입니다.
+  `citation_count`는 `citation_percentile`(같은 연도 내 백분위, alembic 0010)로
+  환산되어 검색 랭킹에 실제로 반영됩니다 — 결측이면 중립값 0.5로 대체합니다.
+  아무도 읽지 않던 `final_venue`·`authors.s2_author_id`·`citations`는 alembic
+  0012에서 제거했습니다(아래 표).
 
 코퍼스 테이블에는 SQLAlchemy 모델이 없습니다. `alembic/env.py`의 `CORPUS_TABLES`가
 autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을 만들어도 코퍼스를 건드리지
@@ -174,6 +176,27 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 | `revisions` | 저장할 수가 없음 — papers는 openreview_id로 upsert라 최신 버전만 남음. 대신 `GET /api/papers/{id}/revisions`가 OpenReview를 실시간 조회 |
 | `similar_paper_matches.similarity_score` | 논문별 유사도 점수는 만들 수 없음 (아래 6번) → `rank` + `match_type`으로 대체 |
 | `submissions.embedding` | 저장하려면 vector(768)이어야 하는데, 재사용 이득보다 스키마 결합이 큼 |
+
+### 스키마 전수 조사로 걷어낸 것 (alembic 0012, 2026-08-07)
+판정 기준은 **SELECT 하는 코드가 저장소에 있는가** 하나였습니다. 읽는 쪽이 없으면
+채우는 비용만 나가고, 다음 사람이 "이미 채워진 줄 알고" 읽으려 듭니다.
+
+| 대상 | 이유 |
+|---|---|
+| `submissions.content` | 텍스트 붙여넣기 경로가 사라진 뒤 항상 NULL. ⚠️ **`SubmissionResponse`에서 필드가 없어졌습니다** — 프론트가 읽고 있었다면 지우세요 |
+| `reviews.raw_content` | 선언만 있고 INSERT된 적이 없음 |
+| `reviews.points_extracted` + `reviews_pending` 인덱스 | true로 세팅만 하고 WHERE에 쓰는 곳이 없음. 수집 재개는 `ingest_status`가 담당 |
+| `review_points.embedding` | 지적항목은 쿼리 시점에 임베딩하므로(§13) 늘 NULL |
+| `citations` 테이블 | 적재 코드만 있고 조회가 0건. 인용 그래프를 쓸 계획 없음 (실측 0행) |
+| `papers.final_venue` | 같은 개념을 `query/journey.py`가 `submission_links`로 계산함. 컬럼 쪽은 소비자 없음 (25,426행 폐기) |
+| `authors.s2_author_id` + `authors_s2` 인덱스 | 성(姓) 매칭으로 채웠지만 읽는 곳 없음 (57,910행 폐기) |
+| `similar_paper_matches_selected` 인덱스 | 0011이 "선정 5편만 꺼내는 조회"용으로 만들었지만, 유일한 조회 `matches_for()`에 `WHERE selected`가 없어 쓰일 수 없었음 |
+| `similar_paper_matches_paper` 인덱스 | `paper_id`로 거르는 쿼리가 없음 |
+| `papers_decision` 인덱스 | `WHERE decision` 술어가 없고 값이 9종뿐이라 플래너가 고르지 않음 |
+
+`final_venue`·`s2_author_id`는 S2 호출로 채운 실데이터를 버립니다. 되살리려면
+`s2_enricher`를 다시 돌려야 하고 API 호출이 다시 듭니다(그래서 downgrade는 컬럼만
+되돌리고 값은 NULL입니다).
 
 ## 5. 로컬 실행 방법
 
@@ -245,7 +268,7 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 | User | `PATCH /api/user/me` | 내 정보 수정 (nickname, openreview_id) | 필요 |
 | User | `DELETE /api/user/me` | 회원 탈퇴 (submissions 이하 CASCADE 삭제) | 필요 |
 | User | `GET /api/user/me/onboarding` | 내 온보딩 답변 조회 (마이페이지) | 필요 |
-| Submission | `POST /api/submissions/pdf` | 내 논문 업로드 — **유일한 입력 경로**. title/abstract가 비면 PDF에서 추출, 응답에 `page_count`. 추출 실패·20MB 초과·60p 초과는 422 | 필요 |
+| Submission | `POST /api/submissions/pdf` | 내 논문 업로드 — **유일한 입력 경로**. title/abstract가 비면 PDF에서 추출, 응답에 `page_count`. 추출 실패·60p 초과는 422, **20MB 초과는 413** | 필요 |
 | Submission | `GET /api/submissions` | 내 초안 목록 (최신순, 본문 제외) | 필요 |
 | Submission | `GET /api/submissions/{id}` | 초안 상세 | 필요 |
 | Submission | `DELETE /api/submissions/{id}` | 초안 삭제 (분석 결과도 함께) → **204** | 필요 |
@@ -418,9 +441,11 @@ lift도 Fisher 검정도 무의미하기 때문입니다. 되살리려면
 - [x] **arXiv/S2 보강 실행** — 설계서 §20의 파이프라인을 2026-08-02에 전 단계
       실행했습니다(결과는 §25). alembic `0008`로 `papers.citation_count` 드리프트를
       먼저 복구해야 했습니다.
-- [ ] **보강 필드를 실제로 쓰기** — `citation_count`·`final_venue`가 채워졌지만 읽는
-      코드가 없습니다. 검색 랭킹 보정이나 논문 상세의 최종 게재처 표시 등 소비처를
-      정하는 것이 먼저이고, `--citations`(인용 엣지 적재)는 그 뒤에 돌리면 됩니다.
+- [x] **보강 필드를 실제로 쓰기** — `citation_count`는 alembic `0010`의
+      `citation_percentile`(같은 연도 내 백분위)로 환산돼 검색 랭킹에 들어갔습니다.
+      소비처를 못 찾은 `final_venue`·`authors.s2_author_id`와 한 번도 적재하지 않은
+      `citations`는 alembic `0012`에서 제거했습니다 — 채우는 비용(S2 호출)만 나가고
+      읽는 쪽이 없는 상태를 유지하지 않기로 했습니다.
 - [x] **코퍼스 중복 — 검색에서 접음** (설계서 §26.5). 실측 302쌍 중 301쌍이
       NeurIPS 2021이고, **두 행의 리뷰가 하나도 겹치지 않습니다**(쌍당 평균 7.8건).
       한쪽을 지우면 실제 리뷰 약 1,170건이 사라지므로 **DB는 건드리지 않고**

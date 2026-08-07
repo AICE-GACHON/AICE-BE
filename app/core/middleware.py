@@ -66,14 +66,32 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    """Content-Length가 상한을 넘는 요청을 본문을 읽기 전에 413으로 끊는다.
+def _refuse(status_code: int, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "data": None,
+            "error": {"code": str(status_code), "message": message},
+        })
 
-    **이것만으로는 충분하지 않다.** Content-Length는 클라이언트가 보내는 값이고,
-    chunked 전송에는 아예 없다. 그래서 실제로 바이트를 세는 방어는 본문을 읽는
-    쪽(app/routers/submissions.py의 PDF 업로드)에 따로 있다. 여기서 거르는 것은
-    "정직하게 큰 요청"이고, 그것만으로도 서버가 24MB짜리 JSON을 파싱하느라
-    메모리를 쓰는 일은 사라진다.
+
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """본문 길이가 상한을 넘는 요청을 **본문을 읽기 전에** 끊는다.
+
+    Content-Length가 상한을 넘으면 413이다. 여기까지는 자명하다.
+
+    문제는 Content-Length가 **없는** 경우다. chunked 전송에는 그 헤더가 아예 없고,
+    그러면 길이를 미리 알 방법이 없다. 예전에는 "실제로 바이트를 세는 방어가 본문을
+    읽는 쪽에 따로 있다"고 적어두고 통과시켰지만, 그건 사실이 아니었다 — FastAPI는
+    엔드포인트 함수가 시작되기 **전에** File(...) 의존성을 풀면서 multipart 본문을
+    통째로 파싱해 임시파일(1MB 넘으면 디스크)에 쌓는다. 즉 업로드 핸들러의 상한
+    검사에 도달하는 시점에는 이미 다 받은 뒤라, 길이를 밝히지 않은 요청은 디스크를
+    원하는 만큼 채울 수 있었다.
+
+    그래서 본문이 있는데 길이를 밝히지 않은 요청은 411로 거부한다. 브라우저 fetch와
+    httpx는 파일·JSON 본문에 항상 Content-Length를 붙이므로 정상 클라이언트는
+    영향받지 않는다.
     """
 
     def __init__(self, app, max_bytes: int):
@@ -82,19 +100,20 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         raw = request.headers.get("content-length")
-        if raw is not None:
-            try:
-                declared = int(raw)
-            except ValueError:
-                declared = None
-            if declared is not None and declared > self.max_bytes:
-                log.warning("본문 상한 초과로 거부: %s %s (%d bytes)",
-                            request.method, request.url.path, declared)
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "success": False,
-                        "data": None,
-                        "error": {"code": "413", "message": "요청 본문이 너무 큽니다."},
-                    })
+        if raw is None:
+            # 본문이 있다는 신호(chunked)인데 길이가 없으면 여기서 끊는다.
+            if "chunked" in request.headers.get("transfer-encoding", "").lower():
+                log.warning("길이를 밝히지 않은 본문 거부: %s %s",
+                            request.method, request.url.path)
+                return _refuse(411, "요청 본문의 길이(Content-Length)를 함께 보내주세요.")
+            return await call_next(request)
+
+        try:
+            declared = int(raw)
+        except ValueError:
+            declared = None
+        if declared is not None and declared > self.max_bytes:
+            log.warning("본문 상한 초과로 거부: %s %s (%d bytes)",
+                        request.method, request.url.path, declared)
+            return _refuse(413, "요청 본문이 너무 큽니다.")
         return await call_next(request)
