@@ -54,6 +54,12 @@ def test_app_only_touches_the_public_api():
     leaks = []
     for rel, target in _paper_assistant_imports():
         parts = target.split(".")
+        if len(parts) == 1:                             # import paper_assistant
+            # 패키지를 통째로 들고 가면 내부 어디든 찌를 수 있으므로 누수로 본다.
+            # (여기서 걸러두지 않으면 아래 parts[1]이 IndexError로 터져서, 무엇이
+            #  문제인지 알려주지 못한 채 테스트만 죽는다.)
+            leaks.append(f"{rel}: {target}")
+            continue
         if len(parts) == 2 and parts[1] in public:      # from paper_assistant import analyze
             continue
         if parts[1] in ALLOWED_SUBMODULES:              # schemas / config
