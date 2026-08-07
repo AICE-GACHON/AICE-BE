@@ -60,12 +60,17 @@ def owned_submission(db: Session, submission_id: uuid.UUID, user: User) -> Submi
 
 
 async def read_capped(upload: UploadFile, max_bytes: int = MAX_PDF_BYTES) -> bytes:
-    """상한까지만 읽고, 넘으면 즉시 끊는다.
+    """임시파일에서 상한까지만 **메모리로** 옮기고, 넘으면 즉시 끊는다.
 
-    예전에는 `await upload.read()`로 통째로 읽은 **뒤에** 길이를 봤다. 그러면
-    거부할 파일도 일단 전부 메모리에 올라간다 — 로그인한 사용자 한 명이 수 GB짜리
-    본문을 보내면 상한 검사에 도달하기 전에 서버가 죽는다. 검사가 읽기보다
-    먼저여야 의미가 있다.
+    예전에는 `await upload.read()`로 통째로 읽은 뒤에 길이를 봤다. 그러면 거부할
+    파일도 일단 전부 bytes로 메모리에 올라간다. 여기서는 21MB짜리를 21MB만큼
+    복사하지 않는다.
+
+    ⚠️ **여기가 전송 단계의 방어는 아니다.** 이 함수가 불릴 때는 FastAPI가 이미
+    File(...) 의존성을 풀면서 multipart 본문을 전부 받아 임시파일(1MB 넘으면
+    디스크)에 쌓아둔 뒤다. 즉 "서버가 다 받기 전에 끊는" 일은 여기서 할 수 없다 —
+    그건 app/core/middleware.py의 BodySizeLimitMiddleware가 Content-Length로
+    하고, 길이를 밝히지 않은 요청은 411로 거부한다.
 
     한 청크를 더 읽어보는 이유: 정확히 max_bytes에서 멈추면 "딱 상한"과 "상한
     초과"를 구분할 수 없다.
@@ -161,7 +166,7 @@ async def create_from_pdf(db: Session, user: User, pdf: UploadFile, *,
         raise HTTPException(status_code=422, detail=_PDF_EXTRACT_ERROR)
 
     submission = Submission(
-        user_id=user.user_id, title=title, abstract=abstract, content=None,
+        user_id=user.user_id, title=title, abstract=abstract,
         field=field, pdf_bytes=pdf_bytes, page_count=pages)
     db.add(submission)
     db.commit()

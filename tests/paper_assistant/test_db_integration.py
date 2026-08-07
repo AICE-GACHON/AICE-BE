@@ -58,7 +58,7 @@ def test_schema_has_expected_tables():
                     "WHERE table_schema = 'public'")
         tables = {row[0] for row in cur.fetchall()}
     assert {"papers", "reviews", "review_points", "authors", "paper_authors",
-            "citations", "submission_links", "ingest_status"} <= tables
+            "submission_links", "ingest_status"} <= tables
 
 
 def test_pgvector_extension_is_installed():

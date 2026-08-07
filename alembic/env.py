@@ -29,7 +29,6 @@ CORPUS_TABLES = {
     "review_points",
     "aspect_base_rates",
     "venue_stats",
-    "citations",
     "submission_links",
     "ingest_status",
     # 심사 서사 캐시. alembic 0009가 만들지만 소유자는 AI 파트이고 SQLAlchemy 모델이

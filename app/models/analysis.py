@@ -61,7 +61,11 @@ class ReviewPrediction(Base):
     # AI 파트가 필드를 늘릴 때마다 마이그레이션을 만들어야 하기 때문입니다.
     report: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
-    # 아래 둘은 report 안에도 있지만 목록 조회에서 JSONB를 매번 파싱하지 않도록 꺼내 둔 사본.
+    # 아래 둘은 report 안에도 있는 값의 사본이다. **지금은 조회 성능 때문이 아니다** —
+    # 분석을 여러 건 훑는 목록 조회가 없고, 응답에는 report 전체가 그대로 실린다.
+    # 남겨 둔 이유는 SQL에서 WHERE/GROUP BY로 걸 수 있는 손잡이가 필요해서다
+    # ("weak가 몇 %인가" 같은 질문에 JSONB를 파싱하지 않고 답한다).
+    # ⚠️ report와 어긋날 수 있는 값이므로 **쓰는 곳은 run_analysis 한 곳뿐이어야 한다.**
     confidence_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_reliable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
@@ -93,12 +97,15 @@ class SimilarPaperMatch(Base):
     남깁니다 — 프론트에 "유사도 92%" 같은 UI를 만들면 안 됩니다.
     """
     __tablename__ = "similar_paper_matches"
+    # 인덱스는 이것 하나다. matches_for()가 prediction_id로 후보 50편을 통째로 읽는
+    # 것이 유일한 조회라, 여기에 다 걸린다.
+    #
+    # 0011이 만들었던 `..._selected`(부분 인덱스)와 `..._paper`는 0012에서 지웠다.
+    # 전자는 "선정 5편만 꺼내는 조회"를 노렸지만 matches_for()에 WHERE selected가
+    # 없어 쓰일 수 없었고(정렬 키로만 쓴다), 후자는 paper_id로 거르는 쿼리가 없다.
+    # **selected로 거르는 조회를 새로 만든다면 그때 부분 인덱스를 되살릴 것.**
     __table_args__ = (
         Index("similar_paper_matches_prediction", "prediction_id", "rank"),
-        Index("similar_paper_matches_paper", "paper_id"),
-        # 선정 5편만 꺼내는 것이 가장 흔한 조회다. 후보 50편이 쌓이므로 부분 인덱스로.
-        Index("similar_paper_matches_selected", "prediction_id", "llm_rank",
-              postgresql_where=text("selected")),
     )
 
     match_id: Mapped[uuid.UUID] = mapped_column(

@@ -101,6 +101,14 @@ Supervisor 패턴 대신 **고정 DAG**. 워크플로우가 매번 동일하므�
 
 ## 3. 데이터 스키마 (Postgres + pgvector)
 
+> ⚠️ **이 절은 설계 시점의 스케치입니다. 실제 스키마의 정본은
+> [`scripts/init_db.sql`](../scripts/init_db.sql) 과 `alembic/versions/` 입니다.**
+> 특히 2026-08-07의 전수 조사(alembic `0012`)에서 아래 중 **읽는 코드가 없던 것들을
+> 제거했습니다** — `citations` 테이블 전체, `papers.final_venue`,
+> `authors.s2_author_id`, `review_points.embedding`, `reviews.raw_content`,
+> `reviews.points_extracted`. 근거는 docs/DEVELOPMENT.md §4를 보세요.
+> 아래 DDL과 §25의 실측 기록은 그 시점의 설계·측정으로 남겨 둡니다.
+
 ```sql
 -- 논문 (검색의 기본 단위)
 CREATE TABLE papers (

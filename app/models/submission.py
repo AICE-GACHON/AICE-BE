@@ -15,6 +15,9 @@ class Submission(Base):
     코퍼스의 papers 테이블과 구조가 비슷해 보이지만 성격이 다릅니다 — papers는 이미
     심사가 끝난 공개 논문이고, submissions는 아직 리뷰를 받지 않은 사용자 소유의 논문입니다.
 
+    본문(content) 컬럼은 없습니다. 텍스트 붙여넣기 경로가 사라진 뒤로 항상 NULL이라
+    alembic 0012에서 지웠습니다 — 본문이 필요하면 pdf_bytes에서 추출합니다.
+
     임베딩 컬럼은 두지 않습니다. 분석할 때마다 paper_assistant가 SPECTER2로 계산하고
     버립니다 (저장하려면 vector(768)이어야 하는데, 재사용 이득보다 스키마 결합이 큽니다).
 
@@ -34,9 +37,6 @@ class Submission(Base):
         nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     abstract: Mapped[str] = mapped_column(Text, nullable=False)
-    # 텍스트 붙여넣기 경로가 사라지면서 항상 NULL이 됩니다. 과거 초안의 내용을
-    # 지우지 않으려고 컬럼은 남겨 뒀습니다 — 정리는 별도 작업입니다.
-    content: Mapped[str | None] = mapped_column(Text, nullable=True)
     field: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # ⚠️ **deferred=True 를 지우지 마세요.** 최대 20MB짜리 블롭이라, 지연 로딩이 아니면

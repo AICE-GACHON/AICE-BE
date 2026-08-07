@@ -10,12 +10,14 @@ class SubmissionResponse(ORMBase, TimestampMixin):
 
     ⚠️ **pdf_bytes를 절대 넣지 마세요.** 최대 20MB짜리 블롭이라 응답에 실리면
     base64로 부풀어 매 조회가 수십 MB가 됩니다. PDF는 서버가 분석할 때만 읽습니다.
+
+    ⚠️ 예전에 있던 `content` 필드는 사라졌습니다 (alembic 0012). 텍스트 붙여넣기
+    경로가 없어진 뒤로 늘 null만 나가던 필드입니다 — 프론트가 읽고 있었다면 지우세요.
     """
     submission_id: uuid.UUID
     user_id: uuid.UUID
     title: str
     abstract: str
-    content: str | None
     field: str | None
     page_count: int | None = Field(
         default=None,
@@ -25,7 +27,7 @@ class SubmissionResponse(ORMBase, TimestampMixin):
 
 
 class SubmissionSummary(ORMBase, TimestampMixin):
-    """목록 응답 — 본문(content)과 초록을 싣지 않아 가볍습니다."""
+    """목록 응답 — 초록을 싣지 않아 가볍습니다."""
     submission_id: uuid.UUID
     title: str
     field: str | None

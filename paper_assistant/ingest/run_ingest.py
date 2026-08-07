@@ -58,7 +58,7 @@ def _flush(buffer, embedder, extractor):
             if not review.openreview_id:
                 continue
             points = extractor.extract(review)
-            # 지적항목 텍스트만 저장, 임베딩은 쿼리 시점으로 미룸 (embeddings=None)
+            # 지적항목은 텍스트만 저장한다 — 임베딩은 쿼리 시점에 계산한다(§13).
             n_points += load.load_review_points(review.openreview_id, points)
     return n_p, n_r, n_points
 
