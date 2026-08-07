@@ -24,7 +24,7 @@ ML/AI 논문 리서치 어시스턴트 — 백엔드(FastAPI) + AI 분석 파이
 
 **화면(프론트엔드)은 이 저장소에 없습니다.** 별도 저장소
 [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React)이고, 아래
-"8. 프론트엔드 함께 띄우기"대로 나란히 실행합니다.
+"9. 프론트엔드 함께 띄우기"대로 나란히 실행합니다.
 
 두 파트는 **같은 PostgreSQL 하나**를 씁니다. 논문 코퍼스 테이블(`papers`, `reviews`,
 `review_points` …)은 `scripts/init_db.sql`이, 서비스 테이블(`users`, `submissions` …)은
@@ -114,7 +114,36 @@ pytest
 341개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
-### 8. 프론트엔드 함께 띄우기
+린터는 ruff입니다. 규칙은 `pyproject.toml`의 `[tool.ruff]`에 있고, 지금은 "돌려보기
+전에는 모르는 진짜 버그" 계열만 켜져 있습니다 (스타일 규칙은 의도적으로 꺼둠).
+
+```bash
+ruff check .
+```
+
+### 8. CI (GitHub Actions)
+
+PR과 main push마다 `.github/workflows/ci.yml`이 돕니다.
+
+| 잡 | 하는 일 |
+|---|---|
+| `lint` | `ruff check .` |
+| `smoke` | torch도 DB도 없이 도는 테스트 (258개). 실패의 대부분을 여기서 걸러냅니다 |
+| `test` | pgvector 컨테이너를 띄우고 `init_db.sql` + `alembic upgrade head` 후 전체 341개 |
+| `audit` | `pip-audit`로 의존성 CVE 확인. 머지를 막지는 않습니다 |
+
+`test`는 `smoke`가 통과해야 시작합니다 — torch 설치만 수 분이라 어차피 깨질 PR에
+그 시간을 쓰지 않기 위해서입니다.
+
+CI는 **Python 3.13**에서 돕니다. 개발은 3.14로 해도 되지만, 3.14는 어노테이션을
+지연 평가(PEP 649)해서 3.13에서 import조차 안 되는 코드를 통과시킵니다. README가
+3.13+를 표방하는 한 CI는 낮은 쪽을 지킵니다.
+
+CI의 DB에는 **코퍼스 데이터가 없습니다** (스키마만 있는 빈 DB). 논문 데이터가 필요한
+테스트는 표본을 스스로 적재해야 합니다 — 개발 DB에 적재돼 있다고 그냥 검색하면
+로컬에서만 통과합니다.
+
+### 9. 프론트엔드 함께 띄우기
 
 백엔드와 나란히 클론해서 각각 띄웁니다.
 
@@ -153,13 +182,20 @@ ENVIRONMENT=production
 JWT_SECRET_KEY=<python -c "import secrets; print(secrets.token_urlsafe(48))">
 CORS_ORIGINS=["https://실제-프론트-도메인"]
 ALLOWED_HOSTS=["실제-API-도메인"]
+TRUST_PROXY_HEADERS=1     # 리버스 프록시 뒤에 둘 때만
 ```
+
+`TRUST_PROXY_HEADERS`를 빼먹으면 rate limit이 조용히 망가집니다. 프록시 뒤에서는
+`request.client.host`가 늘 프록시 주소라, IP 기준 상한이 전부 한 바구니로 뭉쳐서
+**로그인 30/hour가 전 사용자 합쳐 시간당 30회**가 됩니다. 반대로 프록시가 없는데
+켜면 클라이언트가 `X-Forwarded-For`를 지어내 상한을 우회할 수 있으니, 실제 배치와
+맞춰서만 켜세요.
 
 | 검사 | 통과 못 하면 |
 |---|---|
 | `JWT_SECRET_KEY`가 `.env.example` 예시 값이거나 32자 미만 | 기동 거부 (환경 무관) |
 | `CORS_ORIGINS`에 `*`·`localhost`·`http://`가 남아 있음 | 기동 거부 |
-| `ALLOWED_HOSTS`가 `*` | 기동 거부 |
+| `ALLOWED_HOSTS`가 `*`이거나 비어 있음 | 기동 거부 |
 | `ENABLE_DOCS`를 명시하지 않음 | `/docs`·`/openapi.json` 자동으로 닫힘 |
 
 `JWT_SECRET_KEY`를 특히 조심하세요. 이 값이 새면 공격자가 임의 `user_id`로
@@ -308,9 +344,9 @@ AI 파트가 실측으로 확인한 함정이라 UI에 그대로 반영해야 �
 - **arXiv/S2 보강은 코퍼스 전체를 덮지 못합니다.** 43,515편 중 `arxiv_id` 26,026편
   (59.8%), `s2_paper_id`·`citation_count` 30,238편(69.5%)입니다. 특히 **탈락 논문은
   38.2%**뿐인데, S2가 학회 venue로 채택 논문만 등록해서 제목 기반 보강(by-venue)이
-  거의 닿지 않기 때문입니다(채택 논문은 98.1%). 인용 엣지(`citations`)는 아직
-  적재하지 않았습니다.
-- 위에서 채운 `citation_count`·`final_venue`는 **아직 검색·분석이 읽지 않습니다.**
-  저장만 돼 있고 랭킹이나 리포트에 반영되지 않습니다.
+  거의 닿지 않기 때문입니다(채택 논문은 98.1%). `citation_count`가 없는 논문은 검색
+  랭킹에서 중립값(백분위 0.5)으로 처리되므로 상도 벌도 받지 않습니다.
+- **인용 그래프는 없습니다.** 적재만 하고 읽는 코드가 없던 `citations` 테이블은
+  `papers.final_venue`·`authors.s2_author_id`와 함께 alembic 0012에서 제거했습니다.
 - 배포 설정(Dockerfile 등)은 없습니다. 다만 설정 자체의 안전장치는 코드에 있습니다 —
   "배포 전 점검" 참고.

@@ -10,6 +10,10 @@
 NAT 뒤의 여러 사용자가 서로의 몫을 잡아먹는다. 인증이 이미 끝난 경로이므로
 계정을 세는 것이 맞다.
 
+⚠️ 리버스 프록시 뒤에 둘 거면 .env에 TRUST_PROXY_HEADERS=1을 넣어야 한다. 안 넣으면
+모든 요청의 IP가 프록시 주소로 보여서 IP 기준 상한이 **서비스 전체 상한**이 된다
+(로그인 30/hour → 전 사용자 합쳐 시간당 30회). 아래 client_ip 참고.
+
 ⚠️ 저장소 기본값은 **프로세스 메모리**다. `uvicorn --workers N`으로 띄우면 워커마다
 따로 세서 실제 상한이 N배가 된다. 워커를 늘릴 거면 .env에 RATE_LIMIT_STORAGE_URI로
 redis://... 를 넣어야 상한이 실제 상한이 된다.
@@ -25,6 +29,27 @@ from app.core.config import settings
 from app.core.security import decode_token
 
 log = logging.getLogger(__name__)
+
+
+def client_ip(request: Request) -> str:
+    """상한을 셀 실제 클라이언트 IP.
+
+    `request.client.host`는 **직전 홉**의 주소다. 리버스 프록시 뒤에서는 그게 늘
+    프록시라, IP 기준 상한이 전부 한 바구니로 뭉친다 — 로그인 30/hour가 서비스
+    전체 30회가 되어 정상 사용자가 429를 맞는다. 그래서 TRUST_PROXY_HEADERS=1이면
+    X-Forwarded-For를 본다.
+
+    **오른쪽 끝 값을 쓴다.** 이 헤더는 클라이언트가 보낸 값에 프록시가 자기가 본
+    주소를 덧붙이는 구조라(nginx `$proxy_add_x_forwarded_for`, ALB 동일), 왼쪽
+    항목들은 클라이언트가 지어낼 수 있다. 우리가 믿을 수 있는 것은 **우리 프록시가
+    적은 마지막 항목**뿐이다 — 프록시가 하나라는 전제이고, 여러 단이면 그만큼
+    안쪽으로 세야 한다.
+    """
+    if settings.TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.rsplit(",", 1)[-1].strip()
+    return get_remote_address(request)
 
 
 def user_or_ip(request: Request) -> str:
@@ -45,7 +70,7 @@ def user_or_ip(request: Request) -> str:
                 return f"user:{payload['sub']}"
         except JWTError:
             pass
-    return f"ip:{get_remote_address(request)}"
+    return f"ip:{client_ip(request)}"
 
 
 _storage_uri = settings.RATE_LIMIT_STORAGE_URI or None
@@ -54,4 +79,4 @@ if _storage_uri:
 else:
     log.info("rate limit 저장소: 프로세스 메모리 — 워커를 늘리면 상한이 워커 수만큼 커집니다")
 
-limiter = Limiter(key_func=get_remote_address, storage_uri=_storage_uri)
+limiter = Limiter(key_func=client_ip, storage_uri=_storage_uri)

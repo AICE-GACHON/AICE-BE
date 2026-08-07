@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     # redis://... 를 넣어야 상한이 실제 상한이 된다 (app/core/rate_limit.py).
     RATE_LIMIT_STORAGE_URI: str = ""
 
+    # 리버스 프록시 뒤에서 서비스하는가. 프록시 뒤에서는 request.client.host가
+    # **프록시의 주소**라, IP 기준 상한이 전부 한 바구니로 뭉친다 — 로그인
+    # 30/hour가 서비스 전체 30회가 되어 정상 사용자가 429를 맞는다.
+    # 켜면 X-Forwarded-For에서 실제 클라이언트 IP를 읽는다 (app/core/rate_limit.py).
+    #
+    # 기본이 off인 이유: 프록시가 없는데 켜면 클라이언트가 헤더를 직접 지어내
+    # 매 요청 다른 IP인 척할 수 있고, 그러면 IP 상한이 통째로 무력화된다.
+    TRUST_PROXY_HEADERS: bool = False
+
     # 요청 본문 상한 (bytes). PDF 업로드(20MB)가 가장 큰 정상 요청이라 여유를
     # 조금 얹었다. 이 상한이 없으면 어떤 엔드포인트든 클라이언트가 보내는 만큼
     # 메모리에 쌓인다 (app/core/middleware.py).
@@ -163,7 +172,14 @@ class Settings(BaseSettings):
                 f"CORS_ORIGINS에 개발용/평문 origin이 남아 있습니다: {insecure}. "
                 "실제 프론트 도메인(https://)만 남기세요.")
 
-        if "*" in self.ALLOWED_HOSTS:
+        if not self.ALLOWED_HOSTS:
+            # 빈 목록은 '*'보다 나쁘다. 기동은 멀쩡히 되고 TrustedHostMiddleware가
+            # **모든** 요청을 400으로 끊는다 — 헬스체크까지 포함이라, 겉보기엔
+            # 뜬 서버가 아무 요청도 받지 못하는 상태가 된다.
+            problems.append(
+                "ALLOWED_HOSTS가 비어 있습니다. 비워두면 모든 요청이 400으로 거부됩니다 "
+                '— 서비스할 도메인을 채우세요 (예: ALLOWED_HOSTS=["api.example.com"]).')
+        elif "*" in self.ALLOWED_HOSTS:
             problems.append(
                 "ALLOWED_HOSTS가 '*'입니다. 서비스할 도메인을 명시하세요 "
                 '(예: ALLOWED_HOSTS=["api.example.com"]).')

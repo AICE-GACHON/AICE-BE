@@ -52,11 +52,32 @@ app = FastAPI(
 
 app.state.limiter = limiter
 
-# 미들웨어는 **등록의 역순으로** 요청을 만난다. 본문 상한을 마지막에 등록해
-# 가장 먼저 돌게 하는 이유는, 24MB짜리 요청이 CORS·rate limit·라우팅을 거치기
-# 전에 끊기는 편이 싸기 때문이다.
+# 미들웨어는 **등록의 역순으로** 요청을 만난다. 아래 순서는 그대로 뒤집어 읽으면
+# 된다: CORS → 본문 상한 → Host 검사 → 보안 헤더 → rate limit → 라우팅.
+#
+# CORS를 **가장 마지막에 등록해 가장 바깥에 두는 것이 중요하다.** 안쪽에 두면
+# 바깥 미들웨어가 만들어낸 응답(본문 상한 413, Host 불일치 400)이 CORS를 거치지
+# 않아 Access-Control-Allow-Origin 없이 나가고, 브라우저가 그 응답을 읽지 못한다
+# — 사용자에게는 "요청 본문이 너무 큽니다" 대신 정체불명의 네트워크 오류가 뜬다.
+#
+# 본문 상한이 그 바로 안쪽인 이유는, 24MB짜리 요청이 Host 검사·rate limit·라우팅을
+# 거치기 전에 끊기는 편이 싸기 때문이다.
 
 app.add_middleware(SlowAPIMiddleware)
+
+# https 뒤에서 서비스할 때만 HSTS를 켠다 (개발 중 http localhost를 브라우저가
+# https로 기억해버리는 사고를 피한다).
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    enable_hsts=_is_production,
+    enable_docs=settings.ENABLE_DOCS,
+)
+
+# Host 헤더를 그대로 믿지 않는다. 기본값 ["*"]는 개발용이고, production에서
+# "*"이거나 비어 있으면 app.core.config의 검증이 기동을 막는다.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
+
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BYTES)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,20 +90,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
     max_age=600,
 )
-
-# https 뒤에서 서비스할 때만 HSTS를 켠다 (개발 중 http localhost를 브라우저가
-# https로 기억해버리는 사고를 피한다).
-app.add_middleware(
-    SecurityHeadersMiddleware,
-    enable_hsts=_is_production,
-    enable_docs=settings.ENABLE_DOCS,
-)
-
-# Host 헤더를 그대로 믿지 않는다. 기본값 ["*"]는 개발용이고, production에서
-# "*"를 남기면 app.core.config의 검증이 기동을 막는다.
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
-
-app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BYTES)
 
 register_exception_handlers(app)
 
