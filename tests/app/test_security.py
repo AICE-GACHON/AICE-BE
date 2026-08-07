@@ -208,6 +208,44 @@ def test_production_refuses_to_boot_with_dev_defaults(overrides, why):
                  ENVIRONMENT="production", **overrides)
 
 
+@pytest.fixture
+def use_llm(monkeypatch):
+    """USE_LLM은 Settings 필드가 아니라 paper_assistant.config를 읽는 property다
+    (공유 값의 단일 소스). 그래서 생성 인자가 아니라 그 모듈을 갈아끼운다."""
+    def _set(value: bool) -> None:
+        monkeypatch.setattr("paper_assistant.config.USE_LLM", value)
+
+    return _set
+
+
+def _prod(**overrides) -> dict:
+    return dict(_env_file=None, JWT_SECRET_KEY=STRONG_SECRET, ENVIRONMENT="production",
+                CORS_ORIGINS=["https://a.com"], ALLOWED_HOSTS=["a.com"], **overrides)
+
+
+def test_production_refuses_llm_with_open_signup(use_llm):
+    """LLM을 켠 채 가입이 열려 있으면 **아무나 계정을 만들어 우리 돈을 쓴다.**
+
+    분석 1회가 약 $0.30이고 청구는 Anthropic에서 우리 카드로 온다. 다른 가드들이
+    '틀리면 공개되는' 종류라면 이건 '틀리면 청구되는' 종류다.
+    """
+    use_llm(True)
+    with pytest.raises(ValidationError):
+        Settings(**_prod(SIGNUP_INVITE_CODE=""))
+
+
+def test_production_allows_llm_when_signup_is_gated(use_llm):
+    use_llm(True)
+    assert Settings(**_prod(SIGNUP_INVITE_CODE="some-code")).SIGNUP_INVITE_CODE
+
+
+def test_production_allows_open_signup_when_llm_is_off(use_llm):
+    """조합만 막는다. LLM이 꺼져 있으면(스텁, $0) 가입을 열어둔 채 화면 흐름만
+    보여주는 것은 정상적인 배포 형태다."""
+    use_llm(False)
+    assert Settings(**_prod(SIGNUP_INVITE_CODE="")).ENVIRONMENT == "production"
+
+
 def test_production_closes_the_api_docs_unless_asked():
     """OpenAPI 스키마는 전체 엔드포인트·파라미터를 그대로 알려주는 공격 지도다."""
     prod = dict(_env_file=None, JWT_SECRET_KEY=STRONG_SECRET, ENVIRONMENT="production",

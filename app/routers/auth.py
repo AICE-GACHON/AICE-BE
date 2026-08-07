@@ -1,3 +1,4 @@
+import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -5,6 +6,7 @@ from jose import JWTError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.google_oauth import verify_google_id_token
 from app.core.rate_limit import limiter
@@ -36,9 +38,39 @@ _duplicate_account = HTTPException(
 _LOGIN_HOURLY_LIMIT = "30/hour"
 
 
+def _require_invite(code: str | None) -> None:
+    """SIGNUP_INVITE_CODE가 설정돼 있으면 신규 가입에 그 코드를 요구한다.
+
+    **가입 경로가 둘이라는 것이 이 함수의 존재 이유다.** 이메일 가입만 막으면
+    구글 버튼으로 그대로 뚫린다 — google_login()은 처음 보는 구글 계정을 그 자리에서
+    새로 만든다. 그래서 두 곳이 같은 함수를 부른다 (docs/배포_계획.md D5).
+
+    이 게이트가 지키는 것은 계정이 아니라 **예산**이다. 돈이 나가는 경로(분석,
+    /story?refresh=true)가 전부 로그인 뒤에 있으므로, 가입이 잠기면 지출이
+    초대 인원 안에 묶인다.
+
+    비어 있으면(개발 기본값) 아무것도 하지 않는다. production에서 LLM이 켜져 있는데
+    이 값이 비면 애초에 서버가 뜨지 않는다 (app/core/config.py).
+    """
+    expected = settings.SIGNUP_INVITE_CODE
+    if not expected:
+        return
+    # compare_digest는 길이가 다르면 바로 False다 — 길이 자체는 어차피 숨겨지지
+    # 않으므로 문제 없고, 같은 길이일 때의 내용 비교가 상수 시간인 것이 요점이다.
+    if code is None or not secrets.compare_digest(code, expected):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="초대 코드가 필요합니다. 코드가 있다면 다시 확인해 주세요.",
+        )
+
+
 @router.post("/signup", response_model=ApiResponse[UserResponse], status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
 def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_db)):
+    # DB를 건드리기 **전에** 검사한다. 뒤에 두면 초대받지 않은 사람도 409/201 차이로
+    # 어떤 이메일이 이미 가입돼 있는지 알아낼 수 있다.
+    _require_invite(payload.invite_code)
+
     if db.query(User).filter(User.email == payload.email).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 가입된 이메일입니다.")
 
@@ -138,6 +170,10 @@ def google_login(request: Request, payload: GoogleLoginRequest, db: Session = De
             db.commit()
 
     if user is None:
+        # 🔴 여기가 신규 가입 경로다. /signup만 막고 이 줄을 빠뜨리면 구글 버튼으로
+        #    초대 게이트가 통째로 우회된다.
+        _require_invite(payload.invite_code)
+
         if not payload.openreview_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

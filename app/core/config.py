@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     # 항상 401을 반환한다 (google_oauth.verify_google_id_token).
     GOOGLE_CLIENT_ID: str = ""
 
+    # 가입 초대 코드. 비어 있으면 가입이 **누구에게나 열려 있다**(개발 기본값).
+    # 값이 있으면 이메일 가입과 구글 **신규** 가입 양쪽이 이 코드를 요구한다
+    # (app/routers/auth.py). 이미 있는 계정의 로그인에는 영향이 없다.
+    #
+    # 이것이 LLM 예산의 경계다. 돈이 나가는 경로(분석, /story?refresh=true)가
+    # 전부 로그인 뒤에 있으므로, 가입을 잠그면 "로그인한 사람 = 초대된 사람"이
+    # 성립한다 (docs/배포_계획.md D5).
+    SIGNUP_INVITE_CODE: str = ""
+
     # OpenReview 계정 — 논문 코퍼스 재수집 배치(scripts/, paper_assistant/ingest/)에서만
     # 쓴다. 코퍼스는 이미 적재돼 있어 서버 운영에는 비어 있어도 된다.
     # 실제로 이 값을 읽는 쪽은 paper_assistant/config.py다.
@@ -183,6 +192,19 @@ class Settings(BaseSettings):
             problems.append(
                 "ALLOWED_HOSTS가 '*'입니다. 서비스할 도메인을 명시하세요 "
                 '(예: ALLOWED_HOSTS=["api.example.com"]).')
+
+        # LLM을 켠 채 가입이 열려 있으면 **아무나 계정을 만들어 돈을 쓸 수 있다**.
+        # 분석 1회가 약 $0.30이고 청구는 우리 카드로 온다. 다른 항목들이 '틀리면
+        # 공개되는' 종류라면 이건 '틀리면 청구되는' 종류다.
+        #
+        # LLM이 꺼져 있으면(스텁, $0) 막지 않는다 — 가입을 열어둔 채 화면 흐름만
+        # 보여주는 것은 정상적인 배포 형태다. 위험한 것은 두 조건의 **조합**뿐이라,
+        # 조합에만 건다.
+        if self.USE_LLM and not self.SIGNUP_INVITE_CODE.strip():
+            problems.append(
+                "PAPER_ASSISTANT_USE_LLM=1인데 SIGNUP_INVITE_CODE가 비어 있습니다. "
+                "가입이 열려 있어 누구나 계정을 만들어 분석(1회 약 $0.30)을 돌릴 수 "
+                "있습니다. 초대 코드를 정하거나, LLM을 끄고 배포하세요.")
 
         if problems:
             raise ValueError(

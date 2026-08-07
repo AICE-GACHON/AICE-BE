@@ -46,6 +46,9 @@ class SignupRequest(BaseModel):
     # 회원가입 전 POST /api/onboarding으로 익명 저장해둔 답변을 이 계정에 연결한다.
     # 없거나 잘못된 값이어도 가입 자체는 막지 않는다 (부가 기능일 뿐).
     onboarding_id: uuid.UUID | None = None
+    # SIGNUP_INVITE_CODE가 설정된 배포에서만 필요하다. 비어 있으면(개발 기본값)
+    # 이 필드는 무시된다. 길이 상한은 비교 전에 거대한 문자열을 받지 않기 위한 것.
+    invite_code: str | None = Field(default=None, max_length=200)
 
 
 class LoginRequest(BaseModel):
@@ -63,6 +66,10 @@ class GoogleLoginRequest(BaseModel):
     """
     id_token: str = Field(max_length=_MAX_TOKEN_LEN)
     openreview_id: str | None = Field(default=None, min_length=1, max_length=100)
+    # openreview_id와 같은 조건이다 — **처음 구글로 가입할 때만** 필요하다.
+    # 이미 있는 계정의 로그인/연동에는 요구하지 않는다 (초대받아 가입한 사람이
+    # 로그인할 때마다 코드를 다시 입력해야 한다면 그건 초대가 아니라 비밀번호다).
+    invite_code: str | None = Field(default=None, max_length=200)
 
 
 class RefreshRequest(BaseModel):
