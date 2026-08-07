@@ -8,6 +8,7 @@
 
     docker compose up -d && alembic upgrade head && pytest
 """
+import pathlib
 import uuid
 
 import pytest
@@ -38,7 +39,29 @@ def _schema_ready() -> tuple[bool, str]:
 
 
 _READY, _REASON = _schema_ready()
-pytestmark = pytest.mark.skipif(not _READY, reason=_REASON)
+
+_HERE = pathlib.Path(__file__).parent
+
+
+def pytest_collection_modifyitems(items):
+    """DB가 준비되지 않았으면 이 디렉터리의 테스트를 전부 skip으로 표시한다.
+
+    **conftest.py에 `pytestmark`를 두는 것으로는 아무 일도 일어나지 않는다.**
+    pytestmark는 테스트 모듈과 클래스에서만 적용되고 conftest에서는 조용히 무시된다.
+    예전에 여기 `pytestmark = pytest.mark.skipif(not _READY, ...)`가 있었지만,
+    로컬에는 DB가 늘 떠 있어(_READY=True) 아무도 그게 죽은 코드인 줄 몰랐다.
+    CI의 smoke 잡(DB 없이 도는)에서 처음으로 skip 대신 psycopg.OperationalError가
+    쏟아지며 드러났다. 훅으로 바꾸면 DB 유무와 무관하게 동작이 같아진다.
+
+    훅은 수집된 **전체** 항목을 받으므로(루트 아래 tests/paper_assistant, tests/meta
+    포함) 이 디렉터리 밑의 것만 골라야 한다.
+    """
+    if _READY:
+        return
+    skip = pytest.mark.skip(reason=_REASON)
+    for item in items:
+        if _HERE in pathlib.Path(str(item.path)).parents:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
