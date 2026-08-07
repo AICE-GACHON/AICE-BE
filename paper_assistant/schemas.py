@@ -35,6 +35,31 @@ class SimilarPaper(BaseModel):
                     "왜 이 논문이 후보에 걸렸는지의 근거.")
 
 
+class ReviewDetail(BaseModel):
+    """개별 리뷰 원문 (상세 보기 전용).
+
+    2023년 이전 venue는 강/약점이 분리되지 않아 weaknesses에 본문 전체가 들어온다
+    (init_db.sql의 needs_llm_split 주석 참고). 프론트는 이 경우를 '리뷰 본문'으로
+    한 덩어리 표시해야 한다.
+
+    **SelectedPaper보다 위에 있어야 한다.** SelectedPaper.reviews가 이 타입을
+    참조하는데, Python 3.13까지는 어노테이션이 클래스 정의 시점에 평가되므로
+    아래에 두면 import 자체가 NameError로 죽는다 (3.14는 PEP 649 지연 평가라
+    가려진다 — 실제로 그렇게 가려져 있었다).
+    """
+    rating: float | None = None
+    rating_raw: str | None = Field(
+        default=None, description="'8: Accept' 등 원문. 척도가 연도마다 다름")
+    confidence: float | None = None
+    summary: str | None = None
+    strengths: str | None = None
+    weaknesses: str | None = None
+    questions: str | None = None
+    is_unsplit: bool = Field(
+        default=False,
+        description="참이면 강/약점 미분리 형식 — weaknesses가 리뷰 본문 전체")
+
+
 class SelectedPaper(BaseModel):
     """**화면의 주인공** — LLM이 고른 논문 1편과 그 논문이 실제로 받은 리뷰.
 
@@ -96,26 +121,6 @@ class PaperSelection(BaseModel):
     confidence: str = Field(
         description="high | medium | low. **숫자 점수가 아닌 이유는 의도한 설계다** — "
                     "유사도 점수는 만들 수 없다(설계서 §20)")
-
-
-class ReviewDetail(BaseModel):
-    """개별 리뷰 원문 (상세 보기 전용).
-
-    2023년 이전 venue는 강/약점이 분리되지 않아 weaknesses에 본문 전체가 들어온다
-    (init_db.sql의 needs_llm_split 주석 참고). 프론트는 이 경우를 '리뷰 본문'으로
-    한 덩어리 표시해야 한다.
-    """
-    rating: float | None = None
-    rating_raw: str | None = Field(
-        default=None, description="'8: Accept' 등 원문. 척도가 연도마다 다름")
-    confidence: float | None = None
-    summary: str | None = None
-    strengths: str | None = None
-    weaknesses: str | None = None
-    questions: str | None = None
-    is_unsplit: bool = Field(
-        default=False,
-        description="참이면 강/약점 미분리 형식 — weaknesses가 리뷰 본문 전체")
 
 
 class ReviewPointDetail(BaseModel):

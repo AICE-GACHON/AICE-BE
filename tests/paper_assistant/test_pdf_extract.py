@@ -98,7 +98,7 @@ def test_title_joins_a_word_split_into_three_pieces():
 
 
 def test_title_rejoins_a_word_broken_by_a_line_break_hyphen():
-    """'LAN-' + 줄바꿈 + 'GUAGE' → 'LANGUAGE'. 하이픈을 남기면 단어가 깨진다.
+    r"""'LAN-' + 줄바꿈 + 'GUAGE' → 'LANGUAGE'. 하이픈을 남기면 단어가 깨진다.
 
     하이픈이 **자기 span**으로 떨어져 나오는 조판이라, 예전에는 그 span이
     잡동사니 규칙(`^\W*$`)에 걸려 삭제되면서 'LAN GUAGE'가 됐다.

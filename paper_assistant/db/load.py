@@ -5,8 +5,6 @@ openreview_id가 자연 키이므로 재실행 시 갱신만 일어난다.
 """
 import logging
 
-from psycopg.types.json import Json
-
 from paper_assistant.db.connection import cursor
 from paper_assistant.ingest.normalize import NormalizedPaper
 

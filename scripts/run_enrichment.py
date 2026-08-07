@@ -11,7 +11,6 @@
 """
 import argparse
 import logging
-import sys
 
 from paper_assistant.ingest import arxiv_client, arxiv_matcher, s2_enricher
 from paper_assistant.ingest.s2_client import S2Client

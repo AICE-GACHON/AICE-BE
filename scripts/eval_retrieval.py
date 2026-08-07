@@ -235,7 +235,8 @@ def main() -> None:
 
     n = len(m_scores)
     if not n:
-        print("평가할 표본이 없습니다."); return
+        print("평가할 표본이 없습니다.")
+        return
 
     def avg(scores, j):
         return sum(s[j] for s in scores) / len(scores)
