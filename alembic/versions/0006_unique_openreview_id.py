@@ -11,7 +11,6 @@ Create Date: 2026-07-29
 나머지는 user_id를 붙여 고유하게 만든다.
 """
 from alembic import op
-import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "0006"

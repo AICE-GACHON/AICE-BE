@@ -3,7 +3,8 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func)
+    BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text,
+    false, func, text)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,6 +13,10 @@ from app.database import Base
 # 아직 끝나지 않은 분석 상태. DB의 부분 유니크 인덱스 조건과 반드시 같아야 한다
 # (alembic 0002) — 여기만 바꾸면 중복 방지가 조용히 풀린다.
 IN_PROGRESS = ("pending", "running")
+
+# 위 상수에서 인덱스의 WHERE 절을 만든다. 문자열을 따로 적으면 IN_PROGRESS를 고쳤을
+# 때 한쪽만 바뀌는데, 그게 정확히 이 주석이 경고하는 상황이다.
+_IN_PROGRESS_SQL = ", ".join(f"'{s}'" for s in IN_PROGRESS)
 
 
 class ReviewPrediction(Base):
@@ -33,6 +38,13 @@ class ReviewPrediction(Base):
     __tablename__ = "review_predictions"
     __table_args__ = (
         Index("review_predictions_submission", "submission_id", "created_at"),
+        # ⚠️ 위 docstring이 말하는 그 부분 유니크 인덱스다. **실제로 만드는 것은
+        # alembic 0002이고, 여기 선언은 "모델이 DB를 설명하게" 하기 위한 것이다.**
+        # 이 선언이 없으면 autogenerate가 "모델에 없는 인덱스"로 보고 DROP을 제안하고,
+        # 그 마이그레이션을 무심코 적용하면 중복 분석 방지가 조용히 풀린다.
+        # (app/models/submission.py에도 같은 취지의 경고가 있다.)
+        Index("review_predictions_one_active", "submission_id", unique=True,
+              postgresql_where=text(f"status IN ({_IN_PROGRESS_SQL})")),
     )
 
     prediction_id: Mapped[uuid.UUID] = mapped_column(
@@ -49,7 +61,11 @@ class ReviewPrediction(Base):
     # AI 파트가 필드를 늘릴 때마다 마이그레이션을 만들어야 하기 때문입니다.
     report: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
-    # 아래 둘은 report 안에도 있지만 목록 조회에서 JSONB를 매번 파싱하지 않도록 꺼내 둔 사본.
+    # 아래 둘은 report 안에도 있는 값의 사본이다. **지금은 조회 성능 때문이 아니다** —
+    # 분석을 여러 건 훑는 목록 조회가 없고, 응답에는 report 전체가 그대로 실린다.
+    # 남겨 둔 이유는 SQL에서 WHERE/GROUP BY로 걸 수 있는 손잡이가 필요해서다
+    # ("weak가 몇 %인가" 같은 질문에 JSONB를 파싱하지 않고 답한다).
+    # ⚠️ report와 어긋날 수 있는 값이므로 **쓰는 곳은 run_analysis 한 곳뿐이어야 한다.**
     confidence_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_reliable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
@@ -66,20 +82,30 @@ class ReviewPrediction(Base):
 
 
 class SimilarPaperMatch(Base):
-    """분석 1회분이 근거로 삼은 유사 논문 목록(similar_paper_matches).
+    """분석 1회분의 검색 후보와 그중 LLM이 고른 논문(similar_paper_matches).
 
-    "이 예측이 어떤 논문을 보고 나왔는지"를 역방향으로도 조회할 수 있게 남깁니다
-    (근거 추적 가능성 확보).
+    **검색 후보 전부를 남깁니다** (50편, alembic 0011). 최종 결과인 5편만 남기지 않는
+    이유는, 2단계 구조에서 "검색이 뽑은 후보"와 "LLM이 고른 것"의 관계가 곧 이
+    파이프라인의 품질 지표이기 때문입니다 — LLM이 검색 상위에서만 고른다면 재정렬이
+    값을 못 하는 것이고, 하위에서 자주 고른다면 1단계 랭킹이 틀린 것입니다.
+    유사도에는 사람 라벨 없는 정답지가 없으므로, 실사용 분석에서 이렇게 모이는 신호가
+    현실적으로 확보 가능한 유일한 대규모 평가 데이터입니다.
 
     ⚠️ 유사도 점수 컬럼이 없는 것은 빠뜨린 게 아니라 의도한 설계입니다. 검색 상위
     20편의 코사인 유사도 폭이 0.013이라 1위와 20위가 사실상 같은 값이고, 어떤 변환을
-    해도 순위를 정당화할 점수가 나오지 않습니다. 그래서 rank(순위)와
-    match_type(왜 걸렸는지)만 남깁니다 — 프론트에 "유사도 92%" 같은 UI를 만들면 안 됩니다.
+    해도 순위를 정당화할 점수가 나오지 않습니다. 그래서 순위와 match_type(왜 걸렸는지)만
+    남깁니다 — 프론트에 "유사도 92%" 같은 UI를 만들면 안 됩니다.
     """
     __tablename__ = "similar_paper_matches"
+    # 인덱스는 이것 하나다. matches_for()가 prediction_id로 후보 50편을 통째로 읽는
+    # 것이 유일한 조회라, 여기에 다 걸린다.
+    #
+    # 0011이 만들었던 `..._selected`(부분 인덱스)와 `..._paper`는 0012에서 지웠다.
+    # 전자는 "선정 5편만 꺼내는 조회"를 노렸지만 matches_for()에 WHERE selected가
+    # 없어 쓰일 수 없었고(정렬 키로만 쓴다), 후자는 paper_id로 거르는 쿼리가 없다.
+    # **selected로 거르는 조회를 새로 만든다면 그때 부분 인덱스를 되살릴 것.**
     __table_args__ = (
         Index("similar_paper_matches_prediction", "prediction_id", "rank"),
-        Index("similar_paper_matches_paper", "paper_id"),
     )
 
     match_id: Mapped[uuid.UUID] = mapped_column(
@@ -92,8 +118,17 @@ class SimilarPaperMatch(Base):
     # 코퍼스 papers.id (BIGINT). 코퍼스 테이블은 scripts/init_db.sql이 관리하므로
     # SQLAlchemy 모델도 FK 제약도 없습니다. 상세 조회는 paper_assistant로 합니다.
     paper_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # **검색 순위**(1~50)입니다. 개편 전에는 이 값이 곧 결과 순위였지만 이제는
+    # 후보 목록에서의 자리이고, 사용자에게 보여줄 순서는 llm_rank 입니다.
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     # both(의미+용어 모두) | semantic(의미만) | lexical(용어만)
     match_type: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    # --- LLM 재정렬 결과 (선정되지 않은 후보는 selected=false, 나머지 둘은 NULL) ---
+    selected: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False)
+    llm_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    selection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -1,0 +1,225 @@
+# CI — PR과 main push마다 린트·테스트를 돌린다.
+#
+# 잡 구성의 의도:
+#   lint   (~30초)  ruff. 독립적으로 돈다.
+#   smoke  (~1분)   torch도 DB도 없이 도는 테스트만. **실패의 대부분을 여기서 잡는다.**
+#   test   (~4분)   smoke가 통과해야 시작한다. Postgres+pgvector를 띄우고 전부 돌린다.
+#   audit  (~1분)   의존성 CVE. 머지를 막지는 않는다 (아래 continue-on-error 주석 참고).
+#
+# test가 smoke에 의존하는 이유: torch 설치만 수 분이라, 어차피 깨질 PR에
+# 그 시간을 쓰지 않으려는 것이다.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 같은 브랜치에 연달아 push하면 이전 실행을 취소한다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # README가 표방하는 최저 지원 버전. 개발은 3.14에서 하지만 CI는 낮은 쪽을 지킨다 —
+  # 3.14는 어노테이션을 지연 평가(PEP 649)해서 3.13에서 import조차 안 되는 코드를
+  # 통과시킨다. 실제로 paper_assistant/schemas.py의 전방 참조가 그렇게 숨어 있었다.
+  PYTHON_VERSION: "3.13"
+
+  # 테스트 전용 값이다. 비밀이 아니다 — CI가 매번 새로 만들고 버리는 DB에만 쓰인다.
+  # 32자 이상이어야 하고 app/core/config.py의 placeholder 목록에 없어야 기동한다.
+  JWT_SECRET_KEY: ci-only-not-a-real-secret-0123456789
+  # LLM 호출은 끈다. 켜면 실제 요금이 나간다 (paper_assistant/config.py).
+  PAPER_ASSISTANT_USE_LLM: "0"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # requirements-dev.txt에 적힌 버전 그대로 쓴다 (`ruff>=0.16` 부분만 잘라냄).
+      # 여기에 버전을 또 적으면 두 곳이 조용히 어긋난다.
+      #
+      # ⚠️ 반드시 블록 스칼라(`run: |`)로 둘 것. 한 줄로 적으면 정규식 안의 ` #`을
+      # YAML이 **주석 시작으로 읽어** 명령이 `pip install "$(grep -oE '^ruff[^` 에서
+      # 잘린다. 그러면 bash가 따옴표를 못 닫고 `unexpected EOF`로 죽는다 —
+      # ruff가 실패한 게 아니라 설치 줄이 실행조차 안 된 것이라 로그가 헷갈린다.
+      - name: ruff 설치
+        run: |
+          pip install "$(grep -oE '^ruff[^ #]*' requirements-dev.txt)"
+
+      - name: ruff check
+        run: ruff check .
+
+  smoke:
+    name: 빠른 검사 (DB·torch 없이)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      # torch/transformers/adapters를 뺀 목록을 **requirements.txt에서 그때그때
+      # 만들어** 쓴다. 가벼운 목록을 따로 파일로 두면 원본과 어긋나기 때문이다.
+      - name: 가벼운 의존성만 설치
+        run: |
+          grep -vE '^(torch|transformers|adapters)\b' requirements.txt > /tmp/req-light.txt
+          grep -vE '^-r '                             requirements-dev.txt > /tmp/req-dev-only.txt
+          pip install -r /tmp/req-light.txt -r /tmp/req-dev-only.txt
+
+      # DB가 없으므로 tests/app은 conftest가 통째로 skip한다 (의도된 동작).
+      # 제외한 5개는 paper_assistant.graph / .embedding을 거쳐 torch를 import한다.
+      # 새 테스트가 여기서 ImportError로 죽는다면, torch에 의존하게 된 것이다 —
+      # 이 목록에 추가하거나(= test 잡에서만 돌린다) 의존을 걷어낼 것.
+      - name: pytest — torch가 필요한 파일 제외
+        run: |
+          pytest \
+            --ignore=tests/paper_assistant/test_clustering.py \
+            --ignore=tests/paper_assistant/test_embedding.py \
+            --ignore=tests/paper_assistant/test_evidence.py \
+            --ignore=tests/paper_assistant/test_pipeline_structure.py \
+            --ignore=tests/paper_assistant/test_rerank.py
+
+  test:
+    name: 전체 테스트 (Postgres + torch)
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      # docker-compose.yml과 같은 이미지. pgvector와 pg_trgm이 들어 있어야 한다.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: paper
+          POSTGRES_PASSWORD: paper
+          POSTGRES_DB: paper_assistant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U paper -d paper_assistant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # 로컬은 5433이지만(로컬 Postgres와의 충돌 회피) 러너에는 다른 Postgres가
+      # 없으므로 그냥 5432를 쓴다.
+      DATABASE_URL: postgresql://paper:paper@localhost:5432/paper_assistant
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      # 기본 PyPI의 torch는 CUDA 런타임까지 딸려 와 2GB가 넘는다. 이 저장소는
+      # CPU로만 임베딩하므로(requirements.txt 주석) CPU 인덱스에서 받는다.
+      # 먼저 깔아두면 다음 단계의 `torch>=2.9`가 이미 충족돼 건너뛴다.
+      - name: torch를 CPU 빌드로 먼저 설치
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: 나머지 의존성 설치
+        run: pip install -r requirements-dev.txt
+
+      # 논문 코퍼스 쪽 스키마(papers, reviews, ...)는 alembic이 아니라 이 SQL이
+      # 만든다. 로컬에서는 docker-compose가 컨테이너 최초 기동 때 자동 실행하지만,
+      # Actions의 service 컨테이너에는 파일을 넣어줄 수 없어 여기서 직접 돌린다.
+      #
+      # psql 대신 psycopg를 쓰는 이유: 방금 설치한 의존성이라 러너 이미지에
+      # postgresql-client가 있는지에 기대지 않아도 된다. 파라미터 없는 execute는
+      # simple query protocol로 나가서 다중 문장 스크립트가 한 번에 들어간다.
+      - name: 코퍼스 스키마 적재 (scripts/init_db.sql)
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+
+          import psycopg
+
+          sql = pathlib.Path("scripts/init_db.sql").read_text(encoding="utf-8")
+          with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+              conn.execute(sql)
+          print("init_db.sql 적재 완료")
+          PY
+
+      # 서비스 쪽 스키마(users, submissions, ...). 0008처럼 코퍼스 테이블을 손대는
+      # 마이그레이션이 있어 init_db.sql 다음에 와야 한다.
+      - name: 서비스 테이블 마이그레이션
+        run: alembic upgrade head
+
+      # 코퍼스 데이터(43,515편)는 없다 — 스키마만 있는 빈 DB다. 테스트는 필요한
+      # 표본을 스스로 적재해야 한다.
+      - name: pytest (전체)
+        run: pytest
+
+  audit:
+    name: 의존성 취약점 (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 무관한 PR이 "어제 공개된 transitive 의존성 CVE" 하나로 막히면, 결국 아무도
+    # 이 잡을 안 보게 된다. 결과는 남기되 머지는 막지 않는다.
+    # 막고 싶어지면 이 줄을 지우면 된다.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: pip-audit 설치
+        run: pip install pip-audit
+
+      # 설치하지 않고 의존성 트리를 해석해 검사한다 (torch를 내려받지 않는다).
+      #
+      # 아래 --ignore-vuln 목록은 "무시해도 된다"가 아니라 **"지금은 올릴 수 없다"**는
+      # 기록이다. 예외를 두지 않으면 이 잡이 영구적으로 빨간 X가 되고, 그러면
+      # continue-on-error로 머지를 막지 않는 것과 무관하게 아무도 결과를 보지 않는다 —
+      # 새 CVE가 하나 더 늘어도 눈에 띄지 않는다. 알려진 것을 명시해야 **새로 생긴
+      # 것만** 빨갛게 뜬다.
+      #
+      #   transformers 4.57.6 — PYSEC-2025-217 / 2026-2288 / 2026-2289 / 2026-2290
+      #     fix가 전부 transformers 5.x다. 그런데 SPECTER2를 로드하는
+      #     adapters 1.3.0이 `transformers ~=4.57.6`으로 고정한다 — 5.x로 올리면
+      #     설치 자체가 되지 않는다. adapters가 transformers 5를 지원하기 전까지는
+      #     **열려 있는 위험**이고, 닫을 방법이 없다.
+      #     노출 평가: 코드가 로드하는 모델은 고정돼 있고(allenai/specter2_base)
+      #     사용자가 모델을 지정할 수 없다. 다만 개별 CVE 본문까지 읽어보지는 않았다.
+      #
+      #   ecdsa 0.19.2 — PYSEC-2026-1325
+      #     python-jose[cryptography]가 끌고 오는 transitive 의존성이다. 우리 JWT는
+      #     HS256(대칭)이라 ECDSA 경로를 타지 않는다. upstream에 fix 버전이 없다.
+      #
+      # ⚠️ 이 목록에는 유효기간이 있다. **adapters 새 버전이 나오면 transformers 5.x
+      #    경로가 열리므로 그때 재검토할 것.** 그냥 두면 "예외 처리해 뒀으니 괜찮다"가
+      #    되어 버린다.
+      - name: requirements 검사
+        run: |
+          pip-audit \
+            --requirement requirements.txt \
+            --requirement requirements-dev.txt \
+            --ignore-vuln PYSEC-2025-217 \
+            --ignore-vuln PYSEC-2026-2288 \
+            --ignore-vuln PYSEC-2026-2289 \
+            --ignore-vuln PYSEC-2026-2290 \
+            --ignore-vuln PYSEC-2026-1325

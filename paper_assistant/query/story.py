@@ -20,7 +20,7 @@ from psycopg.types.json import Jsonb
 
 from paper_assistant import config
 from paper_assistant.db.connection import cursor
-from paper_assistant.graph.llm import get_llm
+from paper_assistant.llm import get_llm
 from paper_assistant.ingest.openreview_client import V2, VENUE_REGISTRY, get_client
 from paper_assistant.query.journey import get_submission_journey
 from paper_assistant.query.narrative import build_narrative

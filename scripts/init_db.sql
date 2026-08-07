@@ -31,7 +31,9 @@ CREATE TABLE papers (
     -- accept-oral / accept-spotlight / accept-poster / accept-notable /
     -- accept / reject / withdrawn / desk-reject / unknown
     decision      TEXT NOT NULL DEFAULT 'unknown',
-    final_venue   TEXT,               -- 재투고 추적으로 확인된 최종 게재처
+    -- 최종 게재처 컬럼은 두지 않는다 (alembic 0012에서 제거). 같은 개념을
+    -- query/journey.py 가 submission_links 를 순회해 계산하고 있어서, 컬럼 쪽은
+    -- S2 호출로 채우기만 하고 읽는 코드가 없었다.
 
     meta_review   TEXT,
     embedding     vector(768),        -- SPECTER2, L2 정규화 상태로 저장
@@ -44,7 +46,8 @@ CREATE TABLE papers (
 
 CREATE INDEX papers_tsv_idx      ON papers USING gin (tsv);
 CREATE INDEX papers_venue_year   ON papers (venue, year);
-CREATE INDEX papers_decision     ON papers (decision);
+-- decision 인덱스는 만들지 않는다 (alembic 0012에서 제거). WHERE decision 술어를
+-- 쓰는 쿼리가 없고, 값이 9종뿐이라 있어도 플래너가 고르지 않는다.
 CREATE INDEX papers_arxiv        ON papers (arxiv_id) WHERE arxiv_id IS NOT NULL;
 CREATE INDEX papers_s2           ON papers (s2_paper_id) WHERE s2_paper_id IS NOT NULL;
 CREATE INDEX papers_title_trgm   ON papers USING gin (title gin_trgm_ops);
@@ -54,13 +57,13 @@ CREATE INDEX papers_title_trgm   ON papers USING gin (title gin_trgm_ops);
 -- (빈 테이블에 만들어두면 적재 중 인덱스 갱신 비용이 계속 발생한다.)
 
 -- --------------------------------------------------------------- authors
+-- s2_author_id 컬럼은 두지 않는다 (alembic 0012에서 제거). S2 저자 ID를 성(姓)
+-- 매칭으로 채웠지만 읽는 코드가 한 곳도 없었다 — 필요해지면 그때 다시 넣는다.
 CREATE TABLE authors (
     id            BIGSERIAL PRIMARY KEY,
     openreview_id TEXT UNIQUE,        -- '~Alice_Kim1' 형태
-    s2_author_id  TEXT,
     name          TEXT
 );
-CREATE INDEX authors_s2 ON authors (s2_author_id) WHERE s2_author_id IS NOT NULL;
 
 CREATE TABLE paper_authors (
     paper_id  BIGINT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
@@ -88,13 +91,12 @@ CREATE TABLE reviews (
 
     -- true면 강점/약점이 분리되지 않은 형식(2023년 이전)이라
     -- LLM에 본문 전체를 넘겨 분리부터 시켜야 한다. 토큰 비용 차이가 크다.
-    needs_llm_split BOOLEAN NOT NULL DEFAULT false,
-
-    raw_content     JSONB,            -- 원본 보존 (스키마 변동 대비)
-    points_extracted BOOLEAN NOT NULL DEFAULT false  -- 지적항목 추출 완료 여부
+    needs_llm_split BOOLEAN NOT NULL DEFAULT false
+    -- raw_content(원본 JSONB)와 points_extracted(추출 완료 플래그)는 두지 않는다
+    -- (alembic 0012에서 제거). 전자는 INSERT된 적이 없고, 후자는 세팅만 하고
+    -- 아무도 WHERE에 쓰지 않았다 — 수집 재개는 ingest_status가 담당한다.
 );
 CREATE INDEX reviews_paper   ON reviews (paper_id);
-CREATE INDEX reviews_pending ON reviews (points_extracted) WHERE NOT points_extracted;
 
 -- ---------------------------------------------------------- review_points
 -- 리뷰에서 LLM으로 추출한 개별 지적 항목. 패턴 클러스터링의 단위.
@@ -112,8 +114,9 @@ CREATE TABLE review_points (
     -- unknown: 강약점 미분리 리뷰인데 약점 섹션 머리말도 없어 지적인지 확정
     -- 불가한 문장. 집계에서 제외한다 (review_extractor.split_weakness_section).
     sentiment TEXT NOT NULL,
-    text      TEXT NOT NULL,          -- 1~2문장 요약
-    embedding vector(768)
+    text      TEXT NOT NULL           -- 1~2문장 요약
+    -- 임베딩 컬럼은 두지 않는다 (alembic 0012에서 제거). 지적항목은 설계상
+    -- 쿼리 시점에 임베딩하므로(설계서 §13) 이 컬럼은 늘 NULL이었다.
 );
 CREATE INDEX review_points_paper  ON review_points (paper_id);
 CREATE INDEX review_points_aspect ON review_points (aspect, sentiment);
@@ -155,14 +158,9 @@ CREATE TABLE venue_stats (
     computed_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ------------------------------------------------------------- citations
--- 그래프 DB 대신 단순 엣지 테이블. 다중 홉 순회 기능이 없어 이것으로 충분하다.
-CREATE TABLE citations (
-    citing_paper_id BIGINT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-    cited_paper_id  BIGINT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-    PRIMARY KEY (citing_paper_id, cited_paper_id)
-);
-CREATE INDEX citations_cited ON citations (cited_paper_id);
+-- 인용 엣지 테이블(citations)은 두지 않는다 (alembic 0012에서 제거). 적재만 하고
+-- 읽는 코드가 없었고, 인용 그래프를 쓸 계획도 없다. 되살릴 일이 생기면 S2의
+-- references 로 다시 만들면 된다.
 
 -- ------------------------------------------------------ submission_links
 -- 같은 논문의 복수 투고 기록 연결 (ICLR reject → NeurIPS accept 추적).

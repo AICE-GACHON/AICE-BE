@@ -58,7 +58,7 @@ def test_schema_has_expected_tables():
                     "WHERE table_schema = 'public'")
         tables = {row[0] for row in cur.fetchall()}
     assert {"papers", "reviews", "review_points", "authors", "paper_authors",
-            "citations", "submission_links", "ingest_status"} <= tables
+            "submission_links", "ingest_status"} <= tables
 
 
 def test_pgvector_extension_is_installed():
@@ -143,9 +143,17 @@ def test_fulltext_survives_urls_in_the_query(sample_paper):
 
 
 def test_fulltext_still_matches_normal_abstracts(sample_paper):
-    """인용을 씌운 뒤에도 평범한 초록이 정상적으로 걸려야 한다."""
+    """인용을 씌운 뒤에도 평범한 초록이 정상적으로 걸려야 한다.
+
+    표본을 **직접 적재한 뒤에** 검색한다. 예전에는 적재 없이 검색만 했는데, 그건
+    개발 DB에 이미 들어 있는 코퍼스 43,515편에 기대는 것이었다 — 코퍼스가 없는
+    빈 DB(=CI)에서는 매칭이 0건이라 실패한다. 검증하려는 것은 "인용이 정상 초록까지
+    걸러내지 않는가"이지 "코퍼스가 적재돼 있는가"가 아니다.
+    """
+    from paper_assistant.db.load import load_papers
     from paper_assistant.retrieval.hybrid_search import _fulltext_search
 
+    load_papers([sample_paper])
     with cursor() as cur:
         hits = _fulltext_search(
             cur,

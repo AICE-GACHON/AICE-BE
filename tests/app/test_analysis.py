@@ -6,14 +6,14 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.models.analysis import ReviewPrediction
-from app.routers.submissions import STALE_AFTER, _now
-
-DRAFT = {"title": "Graph Neural Networks", "abstract": "We propose a GNN."}
+from app.services.analysis import STALE_AFTER, _now
+from tests.app.conftest import upload_pdf
 
 
 @pytest.fixture
 def submission(client, auth):
-    res = client.post("/api/submissions", json=DRAFT, headers=auth["headers"])
+    res = upload_pdf(client, auth)
+    assert res.status_code == 201, res.text
     return res.json()["data"]["submission_id"]
 
 
@@ -109,8 +109,7 @@ def test_get_returns_status_and_empty_matches(client, auth, submission):
 
 
 def test_analysis_of_others_submission_is_404(client, auth, other_user):
-    created = client.post("/api/submissions", json=DRAFT,
-                          headers=other_user["headers"]).json()["data"]
+    created = upload_pdf(client, other_user).json()["data"]
     sid = created["submission_id"]
     assert _start(client, auth, sid).status_code == 404
     assert client.get(f"/api/submissions/{sid}/analysis",

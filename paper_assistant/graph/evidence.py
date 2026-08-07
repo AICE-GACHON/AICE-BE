@@ -1,8 +1,8 @@
 """근거 풀 조립 + 인용 표기 검증 (RAG 근거 추적).
 
-생성 단계가 실제로 **검색된 원문**에 기반하도록, 리뷰 지적 문장과 메타리뷰를
-라벨(E1, M1 …)이 붙은 근거 풀로 만들어 프롬프트에 넣는다. 그리고 모델이 쓴
-`[E1]` 표기를 풀과 대조해 **없는 라벨은 지운다**.
+생성 단계가 실제로 **선정된 5편의 원문**에 기반하도록, 그 논문들의 리뷰 지적 문장과
+메타리뷰를 라벨(E1, M1 …)이 붙은 근거 풀로 만들어 프롬프트에 넣는다. 그리고 모델이
+쓴 `[E1]` 표기를 풀과 대조해 **없는 라벨은 지운다**.
 
 검증이 없으면 "인용해 달라"는 부탁일 뿐이다. 모델이 `[E9]`를 지어내도 화면에는
 근거가 달린 것처럼 보인다.
@@ -17,11 +17,10 @@ DB도 LLM도 모르는 순수 함수라 테스트가 쉽다.
 """
 import re
 
-from paper_assistant.schemas import EvidenceItem, ReviewPattern
+from paper_assistant.schemas import EvidenceItem
 
-# 근거로 넣을 최대 개수. 프롬프트가 길어지면 모델이 통계를 무시하고 문장만 베낀다.
-MAX_POINTS_PER_ASPECT = 2
-MAX_ASPECTS = 5
+# 근거로 넣을 최대 개수. 프롬프트가 길어지면 모델이 요약 대신 문장만 베낀다.
+MAX_POINTS_PER_PAPER = 2
 MAX_META_REVIEWS = 3
 MAX_TEXT = 400          # 지적 문장 1건
 MAX_META_TEXT = 700     # 메타리뷰 1건 (AC 총평이라 길다)
@@ -31,52 +30,48 @@ MAX_META_TEXT = 700     # 메타리뷰 1건 (AC 총평이라 길다)
 _CITE_BLOCK = re.compile(r"\[((?:[EM]\d+)(?:\s*,\s*[EM]\d+)*)\]")
 
 
-def build_evidence(patterns: list[ReviewPattern], papers,
-                   max_aspects: int = MAX_ASPECTS,
-                   max_per_aspect: int = MAX_POINTS_PER_ASPECT,
-                   max_meta: int = MAX_META_REVIEWS) -> list[EvidenceItem]:
-    """검색 결과에서 인용 가능한 근거 풀을 만든다.
+def build_evidence_for_selected(selected, points_by_paper: dict[int, list[dict]],
+                                max_per_paper: int = MAX_POINTS_PER_PAPER,
+                                max_meta: int = MAX_META_REVIEWS
+                                ) -> list[EvidenceItem]:
+    """**선정된 5편**의 리뷰 원문으로 근거 풀을 만든다.
 
-    patterns: aspect별 집계 (상위부터 — 이미 lift/두드러짐 순으로 정렬돼 있다)
-    papers  : SearchResult 리스트 (제목·메타리뷰 출처)
+    예전에는 aspect 집계(ReviewPattern)의 대표 문장에서 뽑았다. 그때는 이웃 20편의
+    통계가 결론이었기 때문이다. 지금 결론은 "이 5편이 이런 지적을 받았다"이므로,
+    근거도 **그 5편에서 직접** 나와야 한다 — 집계에서 뽑으면 화면에 없는 논문의
+    문장이 근거로 붙을 수 있다.
 
-    E* = 리뷰 지적 문장, M* = 메타리뷰. 라벨은 이 함수가 부여하고, 이후 프롬프트와
-    응답 검증이 같은 라벨을 쓴다.
+    E* = 지적 문장, M* = AC 총평. 라벨은 여기서 부여하고 프롬프트와 응답 검증이
+    같은 라벨을 쓴다 (validate_citations).
     """
-    titles = {p.paper_id: p.title for p in papers}
     evidence: list[EvidenceItem] = []
-
-    for pattern in patterns[:max_aspects]:
-        for ex in pattern.examples[:max_per_aspect]:
+    for paper in selected:
+        for point in points_by_paper.get(paper.paper_id, [])[:max_per_paper]:
             evidence.append(EvidenceItem(
                 label=f"E{len(evidence) + 1}",
                 kind="review_point",
-                text=ex.text[:MAX_TEXT],
-                paper_id=ex.paper_id,
-                paper_title=titles.get(ex.paper_id, ""),
-                review_point_id=ex.review_point_id,
-                aspect=pattern.aspect,
-                from_unsplit_review=ex.from_unsplit_review,
+                text=point["text"][:MAX_TEXT],
+                paper_id=paper.paper_id,
+                paper_title=paper.title,
+                review_point_id=point.get("point_id"),
+                aspect=point.get("aspect"),
+                from_unsplit_review=bool(point.get("from_unsplit")),
             ))
 
-    # 메타리뷰는 AC의 최종 판단이라 개별 리뷰보다 신호가 강하다. 상위 이웃부터.
     n_meta = 0
-    for p in papers:
+    for paper in selected:
         if n_meta >= max_meta:
             break
-        text = (getattr(p, "meta_review", None) or "").strip()
+        text = (paper.meta_review or "").strip()
         if not text:
             continue
         n_meta += 1
         evidence.append(EvidenceItem(
-            label=f"M{n_meta}",
-            kind="meta_review",
-            text=text[:MAX_META_TEXT],
-            paper_id=p.paper_id,
-            paper_title=p.title,
-            decision=p.decision,
-        ))
+            label=f"M{n_meta}", kind="meta_review", text=text[:MAX_META_TEXT],
+            paper_id=paper.paper_id, paper_title=paper.title,
+            decision=paper.decision))
     return evidence
+
 
 
 def format_for_prompt(evidence: list[EvidenceItem]) -> list[dict]:

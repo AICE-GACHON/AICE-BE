@@ -1,8 +1,9 @@
 """재투고 궤적 조회 — 같은 논문이 어디에 내서 어떻게 됐는지.
 
-submission_links(744건)는 여태 Report의 resubmission_flows에서 **집계값으로만**
-쓰였다("ICLR reject → NeurIPS accept 12건"). 개별 논문에서 "이 논문은 작년에
-ICLR에서 떨어졌다가 고쳐서 NeurIPS에 붙었다"를 말해주는 경로는 없었다.
+submission_links(744건)는 한때 Report에서 **집계값으로만** 쓰였다("ICLR reject →
+NeurIPS accept 12건"). 그 집계(resubmission_flows)는 통계 레이어와 함께 제거됐고,
+이제 이 링크를 읽는 곳은 여기뿐이다 — 개별 논문에서 "이 논문은 작년에 ICLR에서
+떨어졌다가 고쳐서 NeurIPS에 붙었다"를 말해주는 경로다.
 
 DB 조회만 하므로 빠르고, 외부 API가 죽어도 항상 채워진다 — get_paper_story가
 이 부분만은 반드시 내려줄 수 있게 story.py와 분리해 뒀다.

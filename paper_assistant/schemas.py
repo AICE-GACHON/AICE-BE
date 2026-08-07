@@ -2,6 +2,11 @@
 
 백엔드 팀은 `analyze(...) -> Report` 하나와 이 Pydantic 모델들만 알면 된다.
 
+**통계 레이어는 없다** — review_patterns(lift·Fisher 당락대조)·venue_trends·
+rating_context·resubmission_flows를 걷어냈다. 이 서비스가 파는 것은 통계가 아니라
+선정 5편의 리뷰 원문이고, 5편 위에서는 lift도 Fisher도 무의미하다. 되살리려면
+docs/추천_파이프라인_재설계.md 결정 #1을 먼저 읽을 것.
+
 논문별 유사도 **점수는 담지 않는다** (설계서 §20). 원시 코사인은 물론이고
 백분위 변환도 못 쓴다 — 검색 top-20의 코사인 폭이 0.013이라 1위와 20위가 같은
 값이 되기 때문이다. 대신 `rank`(순위), `match_type`(왜 걸렸는지),
@@ -10,36 +15,24 @@
 from pydantic import BaseModel, Field
 
 
-class SimilarityTag(BaseModel):
-    """왜 유사한가에 대한 구조화된 근거 (설계서 4.1)."""
-    kind: str = Field(description="methodology | dataset | problem_setting | citation")
-    reason: str = Field(description="한 줄 근거")
-
-
 class SimilarPaper(BaseModel):
+    """검색 후보 1편. **화면에 보여줄 것이 아니다** — 그건 SelectedPaper다.
+
+    후보 50편을 Report에 남기는 이유는 근거 추적이다. "검색이 무엇을 뽑았고 LLM이
+    무엇을 골랐는가"의 관계가 이 파이프라인의 품질 지표라(재설계 문서 §4.4.1),
+    후보를 버리면 나중에 잴 방법이 사라진다.
+    """
     paper_id: int
     openreview_id: str
     title: str
     venue: str
     year: int
     decision: str
-    rank: int
+    rank: int = Field(description="검색 순위. 화면 순서가 아니다")
     match_type: str = Field(
         default="both",
         description="both(의미+용어 모두) | semantic(의미만) | lexical(용어만). "
-                    "왜 이 논문이 걸렸는지의 근거.")
-    tags: list[SimilarityTag] = Field(default_factory=list)
-
-    # --- 리뷰 점수 (§19). 원점수는 venue별 척도가 달라 단독 해석 금지 ---
-    avg_rating: float | None = Field(
-        default=None, description="이 논문이 받은 리뷰 점수 평균")
-    rating_count: int = Field(default=0, description="리뷰 수")
-    rating_spread: float | None = Field(
-        default=None, description="최고-최저 점수 차. 크면 리뷰어 의견이 갈렸다는 뜻")
-    rating_vs_venue: float | None = Field(
-        default=None, description="같은 venue 평균 대비 차이(+면 평균 이상)")
-    rating_vs_threshold: float | None = Field(
-        default=None, description="당락 경계 대비 차이. 편향 venue는 None")
+                    "왜 이 논문이 후보에 걸렸는지의 근거.")
 
 
 class ReviewDetail(BaseModel):
@@ -48,6 +41,11 @@ class ReviewDetail(BaseModel):
     2023년 이전 venue는 강/약점이 분리되지 않아 weaknesses에 본문 전체가 들어온다
     (init_db.sql의 needs_llm_split 주석 참고). 프론트는 이 경우를 '리뷰 본문'으로
     한 덩어리 표시해야 한다.
+
+    **SelectedPaper보다 위에 있어야 한다.** SelectedPaper.reviews가 이 타입을
+    참조하는데, Python 3.13까지는 어노테이션이 클래스 정의 시점에 평가되므로
+    아래에 두면 import 자체가 NameError로 죽는다 (3.14는 PEP 649 지연 평가라
+    가려진다 — 실제로 그렇게 가려져 있었다).
     """
     rating: float | None = None
     rating_raw: str | None = Field(
@@ -60,6 +58,69 @@ class ReviewDetail(BaseModel):
     is_unsplit: bool = Field(
         default=False,
         description="참이면 강/약점 미분리 형식 — weaknesses가 리뷰 본문 전체")
+
+
+class SelectedPaper(BaseModel):
+    """**화면의 주인공** — LLM이 고른 논문 1편과 그 논문이 실제로 받은 리뷰.
+
+    이 서비스가 하는 말은 "당신은 X를 지적받을 것입니다"가 아니라 "비슷한 논문들은
+    이런 지적을 받았습니다"이고(README), 그 문장의 근거가 되는 단위가 이것이다.
+    `Report.similar_papers`는 검색 후보 풀이고 **사용자에게 보여줄 것은 이쪽이다.**
+
+    리뷰 전문을 Report에 함께 싣는 이유는 5편뿐이기 때문이다. 이웃 20편일 때는
+    대부분 열람되지 않아 별도 조회로 뺐지만(PaperDetail 주석), 5편은 전부 보여주는
+    것이 목적이라 화면마다 5번씩 더 부르는 편이 낭비다.
+    """
+    # --- 어떤 논문인가 ---
+    paper_id: int
+    openreview_id: str
+    title: str
+    venue: str
+    year: int
+    decision: str
+    openreview_url: str = Field(description="리뷰 원본을 직접 확인할 수 있는 링크")
+    pdf_url: str
+
+    # --- 왜 골랐는가 (2단계 판정) ---
+    rank: int = Field(description="표시 순서 (1이 가장 비슷하다고 판정된 논문)")
+    reason: str = Field(description="왜 비슷한지 — 사용자에게 그대로 노출")
+    confidence: str = Field(
+        description="high | medium | low. **숫자 점수가 아닌 이유는 의도한 설계다** — "
+                    "유사도 점수는 만들 수 없다(설계서 §20)")
+
+    # --- 무슨 리뷰를 받았는가 (본론) ---
+    meta_review: str | None = Field(default=None, description="AC 총평")
+    reviews: list[ReviewDetail] = Field(
+        default_factory=list,
+        description="이 논문이 받은 리뷰 전문. **is_unsplit이 참인 리뷰는 강/약점이 "
+                    "분리되지 않아 weaknesses에 본문 전체가 들어 있다** — '지적'으로 "
+                    "표시하지 말고 '리뷰 본문'으로 한 덩어리 보여줄 것")
+    avg_rating: float | None = None
+    rating_count: int = 0
+    rating_spread: float | None = Field(
+        default=None, description="최고-최저 점수 차. 크면 리뷰어 의견이 갈렸다는 뜻")
+
+
+class PaperSelection(BaseModel):
+    """LLM이 후보 중에서 고른 논문 1편과 그 이유 (2단계 재정렬의 원출력).
+
+    파이프라인 내부용이다 — review_fetch_node가 여기에 논문 메타와 리뷰를 붙여
+    SelectedPaper로 만들고, Report에 실리는 것은 그쪽이다.
+
+    1단계 검색은 제목·초록 임베딩만 보지만, 여기서는 입력 논문의 **PDF 원본**과
+    후보 목록을 함께 넘겨 본문·실험·참고문헌까지 읽고 고르게 한다. 검색 상위 후보
+    50편은 전부 코사인 0.93+ 대역이라 임베딩으로는 그 안에서 순위를 매길 수 없고
+    (설계서 §20), 그 구간을 실제로 가를 수 있는 것이 이 단계다.
+
+    ⚠️ `paper_id`는 **후보 목록과 대조해 검증된 값**이다. 모델이 지어낸 id는
+    graph/nodes.py에서 제거되므로, 여기 남은 것은 전부 실재하는 논문을 가리킨다.
+    """
+    paper_id: int
+    rank: int = Field(description="표시 순서 (1이 가장 비슷하다고 판정된 논문)")
+    reason: str = Field(description="왜 비슷하다고 판단했는지 — 사용자에게 그대로 노출")
+    confidence: str = Field(
+        description="high | medium | low. **숫자 점수가 아닌 이유는 의도한 설계다** — "
+                    "유사도 점수는 만들 수 없다(설계서 §20)")
 
 
 class ReviewPointDetail(BaseModel):
@@ -319,6 +380,13 @@ class PaperStory(BaseModel):
         description="캐시에서 나온 응답이면 최초 생성 시각(ISO). 방금 만든 것이면 None")
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# 아래 둘은 **분석 파이프라인에서 쓰이지 않는다.** 통계 레이어를 걷어내면서
+# analyze() 경로에서 빠졌지만, graph/clustering.py 의 aspect 집계가 이 모양을
+# 반환하고 scripts/eval_retrieval.py 가 그 집계로 §24 평가를 재현한다. 통계
+# 레이어를 되살릴 때의 출발점이기도 하다 (재설계 문서 결정 #1).
+# ─────────────────────────────────────────────────────────────────────────
+
 class ReviewExample(BaseModel):
     """패턴을 대표하는 실제 리뷰 지적 문장 1건.
 
@@ -398,54 +466,6 @@ class ReviewPattern(BaseModel):
         description="당락 격차가 통계적으로 유의한지. False면 표본 부족 — 단정 금지")
 
 
-class VenueTrend(BaseModel):
-    """유사 논문들의 게재 학회/결과 경향.
-
-    ⚠️ accept_rate를 실제 채택률로 해석하면 안 되는 venue가 있다 — NeurIPS는
-    코퍼스의 95%가 accept다(OpenReview가 채택 논문 위주로만 공개). `is_coverage_biased`
-    가 참이면 절대값이 아니라 코퍼스 대비 상대값(lift)으로만 말한다 (설계서 §19).
-    """
-    venue: str
-    year: int | None = None
-    paper_count: int
-    accept_count: int
-    accept_rate: float
-    corpus_accept_rate: float | None = Field(
-        default=None, description="이 학회 코퍼스 전체의 accept 비율 (비교 기준선)")
-    accept_lift: float | None = Field(
-        default=None, description="이웃 accept율 / 코퍼스 accept율")
-    is_coverage_biased: bool = Field(
-        default=False, description="참이면 accept율 절대값 해석 금지 — 표본이 채택 편향")
-
-
-class RatingContext(BaseModel):
-    """이웃 논문들의 리뷰 점수 분포와 당락 기준선 (§19).
-
-    "비슷한 논문들은 몇 점을 받았고, 붙으려면 몇 점이 필요한가"에 답한다.
-    """
-    neighbor_mean: float | None = Field(default=None, description="이웃 평균 점수")
-    accepted_mean: float | None = Field(default=None, description="통과한 이웃의 평균")
-    rejected_mean: float | None = Field(default=None, description="탈락한 이웃의 평균")
-    rated_papers: int = Field(default=0, description="점수가 있는 이웃 수")
-    threshold: float | None = Field(
-        default=None, description="당락 경계 추정치 (편향 없는 venue 기준)")
-    threshold_venue: str | None = Field(
-        default=None, description="경계를 가져온 venue")
-    split_papers: list[str] = Field(
-        default_factory=list,
-        description="리뷰어 의견이 크게 갈린 논문 제목 (spread 상위)")
-    biased_venues: list[str] = Field(
-        default_factory=list,
-        description="표본이 채택 편향된 venue 목록 — accept율 절대해석 금지")
-
-
-class ResubmissionFlow(BaseModel):
-    """재투고 흐름 (예: ICLR reject → NeurIPS accept)."""
-    from_venue: str
-    to_venue: str
-    count: int
-
-
 class RetrievalConfidence(BaseModel):
     """검색 결과 전체를 믿어도 되는지 (설계서 §20).
 
@@ -469,10 +489,17 @@ class Report(BaseModel):
     confidence: RetrievalConfidence = Field(
         default_factory=lambda: RetrievalConfidence())
     similar_papers: list[SimilarPaper] = Field(default_factory=list)
-    review_patterns: list[ReviewPattern] = Field(default_factory=list)
-    venue_trends: list[VenueTrend] = Field(default_factory=list)
-    rating_context: RatingContext = Field(default_factory=lambda: RatingContext())
-    resubmission_flows: list[ResubmissionFlow] = Field(default_factory=list)
+
+    # --- 2단계 LLM 재정렬 결과 (화면의 주인공) ---
+    selected_papers: list[SelectedPaper] = Field(
+        default_factory=list,
+        description="LLM이 고른 논문과 그 논문이 받은 리뷰 (최대 5편). **화면에 보여줄 "
+                    "것은 이것이고 similar_papers는 후보 풀이다.** 비어 있을 수 있다 — "
+                    "검색 신뢰도가 weak이면 재정렬을 돌리지 않고, 정말 비슷한 논문이 "
+                    "5편이 안 되면 모델이 더 적게 고른다(빈 목록도 정직한 답이다). "
+                    "비었을 때 후보 풀을 대신 보여주면 안 된다 — 그게 이 단계를 넣은 "
+                    "이유를 무효로 만든다.")
+
 
     # --- 근거 추적 (RAG) ---
     evidence: list[EvidenceItem] = Field(

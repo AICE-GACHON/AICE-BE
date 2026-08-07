@@ -11,8 +11,11 @@
 ⚠️ paper_id는 UUID가 아니라 BIGINT입니다. 분석 결과의
 similar_papers[].paper_id를 그대로 넘기면 됩니다.
 """
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
+from app.core.deps import get_current_user_optional
+from app.core.rate_limit import limiter
+from app.models.user import User
 from app.schemas.common import ApiResponse
 from app.schemas.corpus import (
     PaperListResponse, PaperResponse, ReviewResponse, RevisionsResponse,
@@ -25,6 +28,21 @@ router = APIRouter(prefix="/api/papers", tags=["papers"])
 
 _NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND, detail="논문을 찾을 수 없습니다.")
+
+# `/revisions`와 `/story`만 외부 자원을 쓴다 — OpenReview 2콜, `/story`는 LLM까지.
+# 나머지 조회는 DB만 보므로 제한하지 않는다.
+#
+# **왜 인증이 아니라 rate limit인가**: 랜딩의 데모가 비로그인 상태에서 `/story`를
+# 부른다. 인증을 걸면 그 화면이 죽는다. 그리고 캐시된 논문을 다시 읽는 것은 DB 조회
+# 1번이라 비용이 없다 — 막아야 할 것은 "조회"가 아니라 **캐시에 없는 논문을 연달아
+# 훑는 것**이다. 시간당 상한이 그걸 정확히 끊는다.
+#
+# 30/hour 근거: 분석 1회가 논문 5편을 내놓으므로 한 사람이 전부 열어봐도 5회다.
+# 6번 분석해야 걸린다. 반면 paper_id를 1부터 훑는 스캔은 30회에서 멈춘다.
+#
+# ⚠️ 저장소가 메모리라 워커를 늘리면 워커별로 따로 센다 (app/core/rate_limit.py).
+# 배포에서 워커를 늘릴 거면 Redis 저장소로 바꿔야 이 상한이 실제로 상한이 된다.
+_EXTERNAL_CALL_LIMIT = "30/hour"
 
 
 @router.get("", response_model=ApiResponse[PaperListResponse])
@@ -68,8 +86,12 @@ def list_paper_reviews(paper_id: int):
 
 
 @router.get("/{paper_id}/revisions", response_model=ApiResponse[RevisionsResponse])
-def get_revisions(paper_id: int):
+@limiter.limit(_EXTERNAL_CALL_LIMIT)
+def get_revisions(request: Request, paper_id: int):
     """저자가 리뷰를 받고 무엇을 고쳤는지 — 제목·초록·PDF 변경 이력.
+
+    ⚠️ IP 기준 시간당 30회로 제한됩니다 (외부 API를 타기 때문). 429가 오면
+    잠시 뒤 다시 시도하세요.
 
     ⚠️ 이 엔드포인트만 **외부 네트워크(OpenReview API)를 탑니다.** papers 테이블에는
     최신 버전만 저장되기 때문입니다. 다른 조회보다 느리고 실패할 수 있으니, 프론트는
@@ -88,9 +110,26 @@ def get_revisions(paper_id: int):
 
 
 @router.get("/{paper_id}/story", response_model=ApiResponse[StoryResponse])
-def get_story(paper_id: int, refresh: bool = Query(
-        default=False, description="캐시를 무시하고 다시 만듭니다 (느립니다)")):
+@limiter.limit(_EXTERNAL_CALL_LIMIT)
+def get_story(
+    request: Request,
+    paper_id: int,
+    refresh: bool = Query(
+        default=False,
+        description="캐시를 무시하고 다시 만듭니다 (느리고, **로그인이 필요합니다**)"),
+    user: User | None = Depends(get_current_user_optional),
+):
     """이 논문이 무엇을 지적받아 무엇을 고쳤는지 — 재투고 궤적 + 심사 타임라인 + 요약.
+
+    ⚠️ **비용이 드는 엔드포인트입니다.** 캐시에 없으면 OpenReview를 2번 타고, LLM이
+    켜져 있으면 Sonnet까지 부릅니다. 그래서 두 가지 제한이 있습니다:
+
+    - **IP 기준 시간당 30회.** 캐시된 논문을 다시 읽는 것은 비용이 없지만, 캐시에 없는
+      논문을 연달아 훑는 것은 호출마다 돈이 나갑니다. 그걸 끊는 상한입니다.
+    - **`refresh=true`는 로그인이 필요합니다.** 캐시를 우회하므로 같은 논문에 대고
+      반복하면 상한을 우회해 무한히 재생성시킬 수 있습니다. 비로그인 요청은 이 값을
+      무시하지 않고 **401로 거절합니다** — 조용히 캐시를 주면 호출자는 최신 결과를
+      받았다고 오해합니다.
 
     유사 논문을 눌렀을 때 "이전엔 이랬는데 리뷰를 받고 이렇게 고쳤다"를 보여주는
     화면용입니다. `/{paper_id}`(원문·리뷰)와 `/{paper_id}/revisions`(수정 diff)를
@@ -118,6 +157,12 @@ def get_story(paper_id: int, refresh: bool = Query(
     결과를 캐시하므로 두 번째부터는 빠릅니다. 논문 상세와 함께 미리 부르지 말고
     사용자가 명시적으로 열었을 때 호출하세요.
     """
+    if refresh and user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="캐시를 다시 만들려면 로그인이 필요합니다.",
+            headers={"WWW-Authenticate": "Bearer"})
+
     story = get_paper_story(paper_id, refresh=refresh)
     if story is None:
         raise _NOT_FOUND

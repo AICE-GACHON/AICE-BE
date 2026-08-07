@@ -9,8 +9,7 @@ import pytest
 from paper_assistant.graph import nodes
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.retrieval.hybrid_search import SearchResult
-from paper_assistant.schemas import (
-    Report, ResubmissionFlow, ReviewExample, ReviewPattern, VenueTrend)
+from paper_assistant.schemas import Report, SelectedPaper
 
 
 def _fake_paper(pid, title, decision="reject", cosine=0.95,
@@ -23,15 +22,13 @@ def _fake_paper(pid, title, decision="reject", cosine=0.95,
         meta_review=meta_review)
 
 
-def _example(text="이 논문은 QM9만으로 평가했다", paper_id=1, point_id=101):
-    return ReviewExample(text=text, paper_id=paper_id, review_point_id=point_id)
-
-
-def test_tagging_node_stub_returns_empty_tags_without_llm():
-    state: PipelineState = {"query_title": "Q", "query_abstract": "A",
-                            "similar_papers": [_fake_paper(1, "P1")]}
-    out = nodes.similarity_tagging_node(state, embedder=None, llm=None)
-    assert out["similarity_tags"] == {1: []}
+def _selected(pid, title, decision="accept-poster", meta_review=None, reason="비슷함"):
+    return SelectedPaper(
+        paper_id=pid, openreview_id=f"or{pid}", title=title, venue="ICLR 2024",
+        year=2024, decision=decision,
+        openreview_url=f"https://openreview.net/forum?id=or{pid}",
+        pdf_url=f"https://openreview.net/pdf?id=or{pid}",
+        rank=pid, reason=reason, confidence="high", meta_review=meta_review)
 
 
 def test_synthesis_assembles_report_without_llm():
@@ -40,14 +37,7 @@ def test_synthesis_assembles_report_without_llm():
         "query_abstract": "abstract",
         "similar_papers": [_fake_paper(1, "P1", "accept-poster"),
                            _fake_paper(2, "P2", "reject")],
-        "similarity_tags": {1: [], 2: []},
-        "review_patterns": [ReviewPattern(
-            label="weak baselines", aspect="baselines",
-            paper_count=2, total_papers=2, examples=[_example()])],
-        "venue_trends": [VenueTrend(venue="ICLR 2024", paper_count=2,
-                                    accept_count=1, accept_rate=0.5)],
-        "resubmission_flows": [ResubmissionFlow(
-            from_venue="ICLR 2024", to_venue="NeurIPS 2024", count=3)],
+        "selected_papers": [_selected(1, "P1"), _selected(2, "P2", "reject")],
     }
     out = nodes.synthesis_node(state, embedder=None, llm=None)
     report = out["report"]
@@ -56,10 +46,7 @@ def test_synthesis_assembles_report_without_llm():
     assert report.similar_papers[0].rank == 1
     assert report.similar_papers[0].match_type == "both"
     assert report.confidence.level == "strong"     # cosine 0.95 → 도메인 안
-    assert report.review_patterns[0].aspect == "baselines"
-    assert report.resubmission_flows[0].from_venue == "ICLR 2024"
-    assert report.resubmission_flows[0].count == 3
-    assert "유사 논문 2편" in report.summary_markdown
+    assert "비슷한 논문 2편" in report.summary_markdown
 
 
 def test_report_is_json_serializable():
@@ -67,7 +54,6 @@ def test_report_is_json_serializable():
     state: PipelineState = {
         "query_title": "Q", "query_abstract": "A",
         "similar_papers": [_fake_paper(1, "P1")],
-        "similarity_tags": {1: []}, "review_patterns": [], "venue_trends": [],
     }
     report = nodes.synthesis_node(state, embedder=None, llm=None)["report"]
     dumped = report.model_dump_json()
@@ -76,10 +62,12 @@ def test_report_is_json_serializable():
 
 
 def _synthesize(papers):
+    """종합 단계만 돌린다. 신뢰도는 **검색 단계가 계산해 state에 넣어 주므로**
+    여기서도 같은 함수로 채운다 — 종합이 자체 계산하지 않게 옮긴 뒤로는, 이걸
+    빼먹으면 기본값(strong)이 들어가 테스트가 조용히 무의미해진다."""
     state: PipelineState = {
         "query_title": "Q", "query_abstract": "A", "similar_papers": papers,
-        "similarity_tags": {p.paper_id: [] for p in papers},
-        "review_patterns": [], "venue_trends": [],
+        "confidence": nodes.confidence_from(papers),
     }
     return nodes.synthesis_node(state, embedder=None, llm=None)["report"]
 
@@ -130,25 +118,33 @@ def test_graph_compiles_with_fake_embedder():
         dim = 768
     graph, _ = build(embedder=FakeEmbedder(), use_llm=False)
     node_names = set(graph.get_graph().nodes)
-    assert {"input", "retrieval", "similarity_tagging",
-            "review_analysis", "venue_trend", "synthesis"} <= node_names
+    assert node_names >= {"input", "retrieval", "llm_rerank", "review_fetch",
+                          "synthesis"}
+    # 통계 레이어의 노드는 사라졌다 — 남아 있으면 제거가 덜 된 것이다.
+    assert not node_names & {"similarity_tagging", "review_analysis", "venue_trend"}
 
 
 # ------------------------------------------------- 근거 추적 (RAG grounding)
+#
+# 근거 풀의 출처가 바뀌었다: aspect 집계(ReviewPattern)의 대표 문장 → **선정 5편의
+# 리뷰 원문**. 결론이 "이 5편이 이런 지적을 받았다"이므로 근거도 그 5편에서 직접
+# 나와야 한다 — 집계에서 뽑으면 화면에 없는 논문의 문장이 근거로 붙는다.
+
 
 def _grounded_state(meta_review=None):
+    """재정렬까지 끝난 상태 — review_fetch_node가 만들어 놓는 형태를 흉내낸다."""
     papers = [_fake_paper(1, "P1", "accept-poster", meta_review=meta_review),
               _fake_paper(2, "P2", "reject")]
     return {
         "query_title": "Graph nets", "query_abstract": "abstract",
         "similar_papers": papers,
-        "similarity_tags": {1: [], 2: []},
-        "review_patterns": [ReviewPattern(
-            label="베이스라인 비교 부족", aspect="baselines",
-            paper_count=2, total_papers=2, lift=1.6, p_value=0.01,
-            is_distinctive=True,
-            examples=[_example("QM9 하나로만 평가했다", paper_id=1, point_id=501)])],
-        "venue_trends": [], "resubmission_flows": [],
+        "selected_papers": [_selected(1, "P1", meta_review=meta_review),
+                            _selected(2, "P2", "reject")],
+        "selection_points": {
+            1: [{"point_id": 501, "aspect": "baselines",
+                 "text": "QM9 하나로만 평가했다", "from_unsplit": False}],
+            2: [],
+        },
     }
 
 
@@ -187,8 +183,33 @@ def test_every_citation_resolves_to_real_evidence():
 
 def test_no_citations_when_there_is_nothing_to_cite():
     state = _grounded_state()
-    state["review_patterns"] = []
+    state["selection_points"] = {1: [], 2: []}
     report = nodes.synthesis_node(state, embedder=None, llm=None)["report"]
     assert report.evidence == []
     assert report.citations == []
     assert "[E" not in report.summary_markdown
+
+
+def test_empty_selection_says_so_instead_of_showing_candidates():
+    """**후보 풀을 대신 보여주면 2단계를 넣은 이유가 무효가 된다.**
+
+    검색에는 50편이 걸려 있어도, 본문을 대조해 비슷하지 않다고 판정했다면 그 사실이
+    답이다. 화면을 비우지 않으려고 후보로 메우면 "비슷한 논문이 받은 리뷰"라는
+    약속이 거짓이 된다.
+    """
+    state = _grounded_state()
+    state["selected_papers"] = []
+    report = nodes.synthesis_node(state, embedder=None, llm=None)["report"]
+    assert report.selected_papers == []
+    assert "찾지 못했" in report.summary_markdown
+    # 후보는 여전히 similar_papers에 남아 있다 (근거 추적용) — 요약이 그걸 결과처럼
+    # 말하지 않는 것이 핵심이다.
+    assert len(report.similar_papers) == 2
+
+
+def test_summary_never_predicts_the_readers_reviews():
+    """주어는 항상 유사 논문이다 — 예측형 문구는 데이터가 뒷받침하지 않는다(§24)."""
+    report = nodes.synthesis_node(_grounded_state(), embedder=None,
+                                  llm=None)["report"]
+    for banned in ("예상 지적", "받을 것", "당신의 논문은"):
+        assert banned not in report.summary_markdown
