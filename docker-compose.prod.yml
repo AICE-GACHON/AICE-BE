@@ -31,7 +31,7 @@ services:
     expose:
       - "8000"
 
-    # t3.medium은 4GB다. API가 다 먹고 호스트를 굶기지 않도록 상한을 둔다.
+    # t4g.medium은 4GB다. API가 다 먹고 호스트를 굶기지 않도록 상한을 둔다.
     # torch+SPECTER2 상주가 ~2.5GB이므로(docs/배포_계획.md §1.2) 3GB면
     # 정상 동작에는 여유가 있고, 새는 경우에는 컨테이너만 죽는다.
     mem_limit: 3g
