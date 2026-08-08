@@ -69,6 +69,17 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(max_length=_MAX_TOKEN_LEN)
 
 
+class PasswordForgotRequest(BaseModel):
+    """비밀번호 재설정 메일 요청. 계정이 없어도 응답은 같다(계정 존재 여부 노출 방지)."""
+    email: EmailStr
+
+
+class PasswordResetRequest(BaseModel):
+    """메일로 받은 토큰으로 새 비밀번호를 정한다."""
+    token: str = Field(max_length=_MAX_TOKEN_LEN)
+    new_password: NewPassword = Field(min_length=8)
+
+
 class UserUpdateRequest(BaseModel):
     """보낸 필드만 갱신한다 (전부 선택).
 

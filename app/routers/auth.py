@@ -7,16 +7,18 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user
 from app.core.google_oauth import verify_google_id_token
+from app.core.mail import MailNotConfigured, deliver_password_reset
 from app.core.rate_limit import limiter
 from app.core.security import (
-    create_access_token, create_refresh_token, decode_token, dummy_verify, hash_password,
-    verify_password,
+    create_access_token, create_password_reset_token, create_refresh_token, decode_token,
+    dummy_verify, hash_password, verify_password,
 )
 from app.database import get_db
 from app.models.onboarding import OnboardingProfile
 from app.models.user import User
 from app.schemas.auth import (
-    GoogleLoginRequest, LoginRequest, RefreshRequest, SignupRequest, TokenResponse, UserResponse,
+    GoogleLoginRequest, LoginRequest, PasswordForgotRequest, PasswordResetRequest, RefreshRequest,
+    SignupRequest, TokenResponse, UserResponse,
 )
 from app.schemas.common import ApiResponse, Message
 
@@ -208,3 +210,81 @@ def logout(db: Session = Depends(get_db), current_user: User = Depends(get_curre
     current_user.token_version += 1
     db.commit()
     return ApiResponse[Message](data=Message(message="로그아웃되었습니다."))
+
+
+# ------------------------------------------------------------ 비밀번호 재설정
+# 이게 없으면 비밀번호를 잊은 사용자는 계정을 영영 쓸 수 없다 (schemas/auth.py의
+# _MAX_LEGACY_PASSWORD_LEN 주석이 그 상황을 이미 전제하고 있었다).
+#
+# ⚠️ **메일 발송이 아직 없다.** 개발 환경에서는 토큰을 로그로 남기고, production
+# 에서는 503을 돌려준다 — app/core/mail.py 참고. 흐름과 검증은 여기서 끝나 있으니
+# 발송 수단만 붙이면 된다.
+
+_invalid_reset_token = HTTPException(
+    status_code=status.HTTP_400_BAD_REQUEST,
+    detail="재설정 링크가 유효하지 않거나 만료되었습니다.",
+)
+
+
+@router.post("/password/forgot", response_model=ApiResponse[Message])
+@limiter.limit("5/minute")
+def forgot_password(request: Request, payload: PasswordForgotRequest,
+                    db: Session = Depends(get_db)):
+    """재설정 토큰을 발급해 메일로 보낸다.
+
+    **계정이 없어도, 구글 전용 계정이어도 응답은 똑같다.** 응답이 갈리면 이
+    엔드포인트가 "이 이메일이 가입돼 있는가"를 알려주는 조회창이 된다.
+
+    구글 전용 계정(password_hash가 NULL)에는 보내지 않는다 — 그 계정에 비밀번호를
+    새로 심는 것은 '재설정'이 아니라 '설정'이고, 로그인 수단을 바꾸는 일이라 별도
+    판단이 필요하다. 그런 사용자는 구글로 로그인하면 된다.
+    """
+    user = db.query(User).filter(User.email == payload.email).first()
+    if user is not None and user.password_hash is not None:
+        token = create_password_reset_token(subject=str(user.user_id),
+                                            version=user.token_version)
+        try:
+            deliver_password_reset(user.email, token)
+        except MailNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            )
+    return ApiResponse[Message](
+        data=Message(message="가입된 이메일이라면 재설정 링크를 보냈습니다.")
+    )
+
+
+@router.post("/password/reset", response_model=ApiResponse[Message])
+@limiter.limit("10/minute")
+def reset_password(request: Request, payload: PasswordResetRequest,
+                   db: Session = Depends(get_db)):
+    """재설정 토큰으로 새 비밀번호를 정한다.
+
+    성공하면 token_version을 올린다. 두 가지를 한 번에 처리한다 —
+    **이 재설정 토큰이 재사용되지 않고**(ver이 어긋난다), 유출된 비밀번호로 이미
+    발급된 refresh_token도 전부 죽는다. 비밀번호를 되찾는 상황은 계정이 남의 손에
+    있었을 가능성이 큰 상황이라, 기존 세션을 남겨두면 안 된다.
+    """
+    try:
+        decoded = decode_token(payload.token)
+    except JWTError:
+        raise _invalid_reset_token
+
+    if decoded.get("type") != "password_reset":
+        raise _invalid_reset_token
+
+    try:
+        user = db.get(User, uuid.UUID(decoded.get("sub")))
+    except (ValueError, TypeError):
+        raise _invalid_reset_token
+
+    if user is None or decoded.get("ver") != user.token_version:
+        raise _invalid_reset_token
+    if user.password_hash is None:
+        # 발급 시점에 걸렀지만, 그 사이 계정이 구글 전용으로 바뀌었을 수 있다.
+        raise _invalid_reset_token
+
+    user.password_hash = hash_password(payload.new_password)
+    user.token_version += 1
+    db.commit()
+    return ApiResponse[Message](data=Message(message="비밀번호가 변경되었습니다."))
