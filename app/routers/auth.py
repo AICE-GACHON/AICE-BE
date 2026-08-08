@@ -38,6 +38,21 @@ _duplicate_account = HTTPException(
 _LOGIN_HOURLY_LIMIT = "30/hour"
 
 
+def _openreview_id_or_placeholder(given: str | None) -> str:
+    """베타에서는 가입 시 OpenReview ID를 받지 않는다. 없으면 자리표시자를 만든다.
+
+    컬럼이 `unique=True, nullable=False`라(app/models/user.py) 비워둘 수 없다.
+    **모든 사용자에게 같은 값을 넣는 것은 답이 아니다** — 두 번째 가입자가
+    IntegrityError로 거절된다. 그래서 계정마다 고유한 값을 만든다.
+
+    `pending:` 접두사는 의도적이다. 진짜 OpenReview ID는 `~Name1` 꼴이라 섞이지
+    않고, 나중에 "아직 안 채운 사람"을 한 번에 찾아낼 수 있다. 사용자는
+    PATCH /api/user/me로 진짜 ID를 넣을 수 있다.
+    """
+    given = (given or "").strip()
+    return given or f"pending:{uuid.uuid4()}"
+
+
 def _require_invite(code: str | None) -> None:
     """SIGNUP_INVITE_CODE가 설정돼 있으면 신규 가입에 그 코드를 요구한다.
 
@@ -78,7 +93,7 @@ def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_d
         email=payload.email,
         password_hash=hash_password(payload.password),
         nickname=payload.nickname,
-        openreview_id=payload.openreview_id,
+        openreview_id=_openreview_id_or_placeholder(payload.openreview_id),
     )
     db.add(user)
     try:
@@ -174,11 +189,8 @@ def google_login(request: Request, payload: GoogleLoginRequest, db: Session = De
         #    초대 게이트가 통째로 우회된다.
         _require_invite(payload.invite_code)
 
-        if not payload.openreview_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="처음 구글로 가입할 때는 openreview_id가 필요합니다.",
-            )
+        # openreview_id는 베타에서 받지 않는다 (이메일 가입과 같은 이유).
+        # 예전에는 여기서 400으로 되돌려보내 프론트가 다시 물어보게 했다.
         if not email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="구글 계정에 이메일이 없습니다."
@@ -188,7 +200,7 @@ def google_login(request: Request, payload: GoogleLoginRequest, db: Session = De
             password_hash=None,
             nickname=(claims.get("name") or email)[:50],
             google_sub=google_sub,
-            openreview_id=payload.openreview_id,
+            openreview_id=_openreview_id_or_placeholder(payload.openreview_id),
         )
         db.add(user)
         try:

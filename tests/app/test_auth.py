@@ -43,12 +43,31 @@ def test_signup_rejects_duplicate_openreview_id(client):
     assert res.status_code == 409
 
 
-def test_signup_requires_openreview_id(client):
-    """openreview_id 없이는 가입할 수 없다 — 코퍼스에서 본인 논문을 찾는 유일한 키다."""
+def test_signup_without_openreview_id_gets_placeholder(client):
+    """베타에서는 openreview_id를 받지 않는다 — 서버가 자리표시자를 만든다.
+
+    예전에는 422로 거절했다(필수였다). 지금 이 값을 읽는 기능이 없어서 가입
+    문턱만 높이고 있었다. 컬럼은 여전히 unique·not null이므로 **비워둘 수는
+    없고**, 계정마다 고유한 값이어야 한다 — 같은 값을 넣으면 두 번째 가입자가
+    IntegrityError로 거절된다.
+    """
     res = client.post("/api/auth/signup", json={
         "email": "no-id@example.com", "password": "password123",
         "nickname": "아이디없음"})
-    assert res.status_code == 422
+    assert res.status_code == 201
+    assert res.json()["data"]["openreview_id"].startswith("pending:")
+
+
+def test_signup_placeholders_are_unique_per_account(client):
+    """자리표시자가 계정마다 달라야 한다. 같으면 두 번째 가입이 통째로 막힌다."""
+    ids = []
+    for i in range(2):
+        res = client.post("/api/auth/signup", json={
+            "email": f"placeholder{i}@example.com", "password": "password123",
+            "nickname": f"사용자{i}"})
+        assert res.status_code == 201, res.text
+        ids.append(res.json()["data"]["openreview_id"])
+    assert ids[0] != ids[1]
 
 
 def test_signup_rejects_short_password(client):
