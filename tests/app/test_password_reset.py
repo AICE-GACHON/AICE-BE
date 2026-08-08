@@ -8,6 +8,8 @@
   - **토큰은 한 번만 쓸 수 있다.** token_version 스냅샷으로 처리한다 — 저장소 없이.
   - **재설정하면 기존 세션이 전부 죽는다.** 계정이 남의 손에 있었을 수 있는 상황이다.
 """
+from urllib.parse import unquote, urlparse
+
 import pytest
 
 from app.core.security import create_password_reset_token
@@ -26,15 +28,16 @@ def _reset(client, token, new_password="brandnew456"):
 def reset_token(client, auth, caplog):
     """forgot을 호출해 발급된 토큰을 얻는다.
 
-    메일 발송 수단이 아직 없어 개발 환경에서는 로그로 나온다(app/core/mail.py).
-    프론트 없이 흐름을 끝까지 시험하려면 이 경로가 유일하다.
+    SMTP가 설정되지 않은 개발 환경에서는 재설정 **링크**가 로그로 나온다
+    (app/core/mail.py). 프론트 없이 흐름을 끝까지 시험하려면 이 경로가 유일하다.
     """
     with caplog.at_level("WARNING", logger="app.core.mail"):
         assert _forgot(client, auth["email"]).status_code == 200
     for record in caplog.records:
-        if "비밀번호 재설정 토큰" in record.getMessage():
-            return record.args[1]
-    pytest.fail("재설정 토큰이 로그에 남지 않았다")
+        if "재설정 링크를 로그로 남긴다" in record.getMessage():
+            url = record.args[1]
+            return unquote(urlparse(url).query.removeprefix("token="))
+    pytest.fail("재설정 링크가 로그에 남지 않았다")
 
 
 # ------------------------------------------------------------ 발급 (forgot)
