@@ -2,7 +2,7 @@ import uuid
 
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, model_validator
 
 from app.schemas.common import ORMBase, TimestampMixin
 
@@ -69,9 +69,46 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(max_length=_MAX_TOKEN_LEN)
 
 
+class PasswordForgotRequest(BaseModel):
+    """비밀번호 재설정 메일 요청. 계정이 없어도 응답은 같다(계정 존재 여부 노출 방지)."""
+    email: EmailStr
+
+
+class PasswordResetRequest(BaseModel):
+    """메일로 받은 토큰으로 새 비밀번호를 정한다."""
+    token: str = Field(max_length=_MAX_TOKEN_LEN)
+    new_password: NewPassword = Field(min_length=8)
+
+
 class UserUpdateRequest(BaseModel):
+    """보낸 필드만 갱신한다 (전부 선택).
+
+    비밀번호는 `current_password`와 `new_password`를 **함께** 보내야 바뀐다.
+    현재 비밀번호를 확인하지 않으면, 탈취된 access_token 하나로 계정을 통째로
+    빼앗을 수 있다 — 비밀번호를 바꿔버리면 원래 주인이 다시 들어올 수 없다.
+    """
     nickname: str | None = Field(default=None, min_length=1, max_length=50)
     openreview_id: str | None = Field(default=None, min_length=1, max_length=100)
+    # 기존 비밀번호는 로그인과 같은 이유로 느슨하게 받는다 — 72바이트 규칙이 생기기
+    # 전에 만들어진 계정은 그보다 긴 값을 쓰고 있고, 422로 막으면 그 계정은 비밀번호를
+    # 영영 바꿀 수 없게 된다. 새 비밀번호에만 NewPassword 규칙을 건다.
+    current_password: str | None = Field(default=None, max_length=_MAX_LEGACY_PASSWORD_LEN)
+    new_password: NewPassword | None = Field(default=None, min_length=8)
+
+    @model_validator(mode="after")
+    def _new_password_requires_current(self) -> "UserUpdateRequest":
+        if self.new_password is not None and self.current_password is None:
+            raise ValueError("비밀번호를 변경하려면 current_password가 필요합니다.")
+        return self
+
+
+class AccountDeleteRequest(BaseModel):
+    """탈퇴 확인. 비밀번호가 있는 계정은 필수다 (구글 전용 계정은 없어도 된다).
+
+    탈퇴는 되돌릴 수 없는데 access_token 하나로 실행되면 위험 대비 확인이 너무
+    가볍다. 로그인과 같은 이유로 길이 규칙은 느슨하게 둔다.
+    """
+    password: str | None = Field(default=None, max_length=_MAX_LEGACY_PASSWORD_LEN)
 
 
 class UserResponse(ORMBase, TimestampMixin):

@@ -48,6 +48,24 @@ def create_refresh_token(subject: str, version: int) -> str:
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+# 비밀번호 재설정 토큰 수명. 메일함이 잠깐 열려 있어도 위험이 오래가지 않도록
+# 짧게 잡는다. 사용자가 메일을 확인하고 새 비밀번호를 정하기에는 충분하다.
+PASSWORD_RESET_EXPIRE_MINUTES = 30
+
+
+def create_password_reset_token(subject: str, version: int) -> str:
+    """비밀번호 재설정용 단기 토큰.
+
+    refresh_token과 같은 방식으로 token_version 스냅샷을 담는다. 그래서
+    **한 번 쓰면 못 쓴다** — 재설정이 성공하면 token_version이 올라가 이 토큰의
+    ver과 어긋난다. 로그아웃이나 비밀번호 변경도 같은 이유로 이 토큰을 무효화한다.
+    (별도 저장소 없이 일회용 성질을 얻는 방법이다.)
+    """
+    expire = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES)
+    payload = {"sub": subject, "exp": expire, "type": "password_reset", "ver": version}
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
 def decode_token(token: str) -> dict:
     """
     JWT를 디코딩해서 payload를 돌려줍니다. 토큰이 만료됐거나 서명이 유효하지 않으면
