@@ -106,6 +106,32 @@ class Settings(BaseSettings):
     OPENREVIEW_USERNAME: str = ""
     OPENREVIEW_PASSWORD: str = ""
 
+    # ------------------------------------------------- 메일 발송 (비밀번호 재설정)
+    # **SMTP를 쓰는 이유**: AWS SES는 API(boto3)와 SMTP 두 가지를 다 제공하는데,
+    # SMTP는 표준 라이브러리로 되어 의존성이 늘지 않고 **공급자를 바꿔도 코드가
+    # 그대로다** (SES → 지메일 → Resend 어디로 가든 이 값들만 바뀐다).
+    # boto3를 쓰면 SES에 묶이고 50MB 남짓이 배포 이미지에 붙는다.
+    #
+    # SMTP_HOST와 SMTP_FROM이 **둘 다 채워져야** 발송을 시도한다. 비어 있으면
+    # 개발 환경에서는 링크를 로그로 남기고 production에서는 503이다
+    # (app/core/mail.py).
+    #
+    # SES 예시 — 서울 리전:
+    #   SMTP_HOST=email-smtp.ap-northeast-2.amazonaws.com
+    #   SMTP_PORT=587
+    #   SMTP_USER / SMTP_PASSWORD  ← SES SMTP 자격증명 (IAM 키와 다른 값이다)
+    #   SMTP_FROM=noreply@도메인   ← SES에서 검증한 주소여야 한다
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587           # 587=STARTTLS, 465=SSL (아래에서 자동 판별)
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+
+    # 재설정 링크의 앞부분. 메일에 넣을 주소를 만들려면 **프론트 배포 주소**가
+    # 필요하다 — 서버는 자기 주소만 알지 프론트가 어디 있는지 모른다.
+    #   {FRONTEND_BASE_URL}/reset-password?token=...
+    FRONTEND_BASE_URL: str = "http://localhost:5173"
+
     # --- AI 파트와 공유하는 값 (선언은 paper_assistant/config.py 한 곳뿐) ---
 
     @property

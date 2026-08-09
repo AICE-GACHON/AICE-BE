@@ -30,7 +30,8 @@ NULL로 남긴다. 검색 시점에 COALESCE로 중립값 0.5를 준다 — NULL
 
 **주의**: 이 백분위는 s2_enricher가 citation_count를 갱신하면 낡는다. 한 논문의
 인용수가 바뀌면 그 해 전체의 백분위가 흔들리므로 개별 UPDATE로는 유지할 수 없다.
-보강 배치 후 scripts/refresh_citation_percentile.sql 을 한 번 돌릴 것.
+scripts/run_enrichment.py 의 마지막 단계가 자동으로 재계산한다. 따로 돌리려면
+`python -m paper_assistant.ingest.citation_percentile`.
 """
 from alembic import op
 
