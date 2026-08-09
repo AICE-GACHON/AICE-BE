@@ -232,6 +232,39 @@ class Settings(BaseSettings):
                 "가입이 열려 있어 누구나 계정을 만들어 분석(1회 약 $0.30)을 돌릴 수 "
                 "있습니다. 초대 코드를 정하거나, LLM을 끄고 배포하세요.")
 
+        # 메일은 **없다고 기동을 막지 않는다.** 위 항목들은 틀리면 공개되거나(CORS,
+        # ALLOWED_HOSTS) 청구되는(초대 코드) 종류지만, SMTP가 비어 있는 것은 기능
+        # 하나가 꺼진 상태일 뿐이고 이미 시끄럽게 실패한다 — production이면
+        # /password/forgot이 503이다(app/core/mail.py). 그것 때문에 분석·검색까지
+        # 통째로 내리는 것은 손해가 더 크다.
+        #
+        # 대신 **절반만 채운 설정**은 막는다. 이쪽이 진짜 조용한 실패다:
+        #   - SMTP_FROM을 MAIL_FROM으로 잘못 쓰면(extra="ignore") 무시되고 빈 채로
+        #     남아, 다 설정한 줄 알았는데 발송 조건이 불성립이라 전부 503이 된다.
+        #   - FRONTEND_BASE_URL이 localhost로 남으면 메일은 정상 발송되는데
+        #     **링크가 전부 깨진 채로 나간다.** 이미 나간 메일은 주워 담을 수 없다.
+        mail_values = [self.SMTP_HOST, self.SMTP_USER, self.SMTP_PASSWORD, self.SMTP_FROM]
+        if any(v.strip() for v in mail_values):
+            missing = [name for name, value in
+                       (("SMTP_HOST", self.SMTP_HOST), ("SMTP_FROM", self.SMTP_FROM))
+                       if not value.strip()]
+            if missing:
+                problems.append(
+                    f"SMTP 설정이 일부만 채워져 있습니다 (비어 있음: {', '.join(missing)}). "
+                    "발송에는 SMTP_HOST와 SMTP_FROM이 **둘 다** 필요합니다 — 하나라도 "
+                    "비면 재설정 메일이 전부 503입니다. "
+                    "보내는 주소 키 이름은 MAIL_FROM이 아니라 SMTP_FROM입니다.")
+            if self.SMTP_USER.strip() and not self.SMTP_PASSWORD.strip():
+                problems.append(
+                    "SMTP_USER는 있는데 SMTP_PASSWORD가 비어 있습니다. 인증에 실패하면 "
+                    "발송 예외는 삼켜지고(계정 존재 여부를 숨기려는 설계) 사용자에게는 "
+                    "200이 나갑니다 — 메일은 오지 않는데 성공으로 보입니다.")
+            base = self.FRONTEND_BASE_URL
+            if "localhost" in base or "127.0.0.1" in base or base.startswith("http://"):
+                problems.append(
+                    f"메일을 켰는데 FRONTEND_BASE_URL이 개발용입니다: {base!r}. "
+                    "재설정 링크가 이 값으로 만들어져 나가므로 받는 사람은 열 수 없습니다.")
+
         if problems:
             raise ValueError(
                 "ENVIRONMENT=production 설정이 안전하지 않습니다:\n  - "
