@@ -759,11 +759,17 @@ def _equation_regions(page) -> list[tuple[float, float, float, float, str]]:
 _MIN_RULE_WIDTH_RATIO = 0.15
 
 
-def _horizontal_rules(page) -> list[float]:
-    """페이지의 가로 벡터선(표 괘선 후보)의 y좌표 목록.
+def _horizontal_rules(page) -> list[tuple[float, float, float]]:
+    """페이지의 가로 벡터선(표 괘선 후보) 목록 — (y좌표, x0, x1).
 
     PyMuPDF page.get_drawings()의 순수 가로선은 rect.height == 0으로 나온다
     (세로선은 반대로 width == 0). 폭이 좁은 것(글자 강조선 등)은 제외한다.
+
+    x0/x1도 같이 돌려준다 — 표/알고리즘이 페이지에 좌우로 나란히 있으면
+    각자의 괘선이 같은 y좌표에 그려지는데(실측: "Algorithm 1"·"Algorithm
+    2"가 나란히 배치), y좌표만으로는 "같은 괘선"과 "높이만 우연히 같은
+    서로 다른 괘선"을 구분할 수 없다(_table_regions가 "이미 다른 표가 쓴
+    괘선인지"를 판단할 때 x범위까지 봐야 함).
     """
     page_width = page.rect.width
     min_width = page_width * _MIN_RULE_WIDTH_RATIO
@@ -773,7 +779,7 @@ def _horizontal_rules(page) -> list[float]:
         if rect is None or rect.height != 0:
             continue
         if rect.width >= min_width:
-            out.append(rect.y0)
+            out.append((rect.y0, rect.x0, rect.x1))
     return out
 
 
@@ -792,7 +798,7 @@ def _repeating_rule_ys(doc) -> frozenset[float]:
     n_pages = doc.page_count
     counter: dict[float, int] = {}
     for pno in range(n_pages):
-        for y in {round(v, 1) for v in _horizontal_rules(doc[pno])}:
+        for y in {round(v[0], 1) for v in _horizontal_rules(doc[pno])}:
             counter[y] = counter.get(y, 0) + 1
     return frozenset(y for y, c in counter.items() if n_pages >= 3 and c >= max(3, n_pages * 0.3))
 
@@ -931,20 +937,47 @@ def _table_regions(page, excluded_rule_ys: frozenset = frozenset()) -> list[tupl
     _typical_line_height = statistics.median(_line_heights) if _line_heights else 12.0
     _HEADER_GAP_LIMIT = _typical_line_height * 1.5
 
+    # ⚠️ **캡션 하나가 서로 다른 두 표에 이중으로 배정될 수 있다.** 표
+    # 두 개가 연달아 있는데 뒤 표(Table 5)를 find_tables()가 "캡션+헤더
+    # 부분만" 별도 grid로 쪼개 잡으면(실측), 그 조각은 자기 진짜 캡션
+    # (Table 5)보다 **앞 표의 캡션(Table 4)에 오히려 더 가까울 수 있다**
+    # — 캡션 사이에 낀 조각이라 앞뒤 둘 다 후보가 되는데, 순전히 거리로
+    # 고르면 이미 다른 조각이 정당하게 쓰고 있는 앞 캡션을 또 골라버린다.
+    # 그러면 같은 라벨로 두 번 매칭된 region이 971행의 "같은 라벨은
+    # 하나로 합친다" 로직을 타고 하나로 합쳐져, Table 4 영역이 Table 5의
+    # 헤더까지 통째로 삼켜버린다(실측: 크롭 이미지 맨 아래에 다음 표의
+    # 헤더 행이 잘려 붙어 나옴). 캡션 하나는 표 하나에만 쓸 수 있다 —
+    # 페이지 위에서 아래 순서로 처리하면서, 이미 배정된 캡션은 뒤 그룹의
+    # 후보에서 제외한다(문서 순서상 위 그룹이 그 캡션의 "진짜 주인"일
+    # 가능성이 항상 더 높다 — 아래 그룹은 자기 진짜 캡션이 아직 남아있다).
+    used_caption_ids: set[int] = set()
+
     merged: dict[str, tuple[float, float, float, float]] = {}
     for group in groups:
         group_top = min(top for _, top, _, _ in group)
         group_bottom = max(bottom for _, _, _, bottom in group)
         group_x0 = min(x0 for x0, _, _, _ in group)
         group_x1 = max(x1 for _, _, x1, _ in group)
-        header_candidates = [
-            b for b in all_blocks
-            if b[6] == 0 and b[3] <= group_top and group_top - b[3] <= _HEADER_GAP_LIMIT
-            and _x_overlap(b[0], b[2], group_x0, group_x1) > 0
-            and not _CAPTION.match(_flatten_block_text(b[4]))
-        ]
-        if header_candidates:
-            group_top = min(group_top, min(b[1] for b in header_candidates))
+        # ⚠️ **놓친 행이 여러 줄 겹칠 수 있다** — find_tables()가 헤더 행뿐
+        # 아니라 데이터 행까지 하나 통째로 놓치면(실측: 위 캡션 중복 배정
+        # 버그와 같은 표에서, "Alpaca" 데이터 행이 grid에서 통째로
+        # 빠짐), 그 놓친 행을 한 번 끌어올린 뒤에도 그 바로 위에 또
+        # 헤더 행이 남아 있을 수 있다. 한 번만 확장하면 데이터 행은
+        # 살려도 진짜 컬럼 헤더는 여전히 새어 나온다 — 더 끌어올릴 후보가
+        # 없을 때까지 반복한다.
+        while True:
+            header_candidates = [
+                b for b in all_blocks
+                if b[6] == 0 and b[3] <= group_top and group_top - b[3] <= _HEADER_GAP_LIMIT
+                and _x_overlap(b[0], b[2], group_x0, group_x1) > 0
+                and not _CAPTION.match(_flatten_block_text(b[4]))
+            ]
+            if not header_candidates:
+                break
+            new_top = min(b[1] for b in header_candidates)
+            if new_top >= group_top:
+                break
+            group_top = new_top
         # 캡션이 여러 개 나란히 있을 때(위 표 나란히 배치와 같은 이유) 순전히
         # 세로 간격만으로 고르면 옆 칸 캡션을 잘못 집을 수 있다 — 가로로
         # 겹치는 캡션을 먼저 걸러내고, 하나도 안 겹치면(드문 경우, 캡션이
@@ -953,20 +986,25 @@ def _table_regions(page, excluded_rule_ys: frozenset = frozenset()) -> list[tupl
             overlapping = [c for c in cands if _x_overlap(c[0], c[2], group_x0, group_x1) > 0]
             return overlapping or cands
 
+        available_captions = [c for c in grid_captions if id(c) not in used_caption_ids]
         candidates = []
         above = _filter_by_x_overlap(
-            [(cx0, cy0, cx1, cy1, label) for cx0, cy0, cx1, cy1, label in grid_captions if cy1 <= group_top])
+            [(cx0, cy0, cx1, cy1, label) for cx0, cy0, cx1, cy1, label in available_captions if cy1 <= group_top])
         if above:
             cx0, cy0, cx1, cy1, label = max(above, key=lambda c: c[3])  # 바로 위 캡션
             candidates.append((group_top - cy1, cy0, cy1, label))
         below = _filter_by_x_overlap(
-            [(cx0, cy0, cx1, cy1, label) for cx0, cy0, cx1, cy1, label in grid_captions if cy0 >= group_bottom])
+            [(cx0, cy0, cx1, cy1, label) for cx0, cy0, cx1, cy1, label in available_captions if cy0 >= group_bottom])
         if below:
             cx0, cy0, cx1, cy1, label = min(below, key=lambda c: c[1])  # 바로 아래 캡션
             candidates.append((cy0 - group_bottom, cy0, cy1, label))
         if not candidates:
             continue
         _gap, cap_y0, cap_y1, label = min(candidates, key=lambda x: x[0])
+        for c in grid_captions:
+            if c[1] == cap_y0 and c[3] == cap_y1 and c[4] == label:
+                used_caption_ids.add(id(c))
+                break
         region_top, region_bottom = min(group_top, cap_y0), max(group_bottom, cap_y1)
         if label in merged:
             prev_top, prev_bottom, prev_x0, prev_x1 = merged[label]
@@ -994,11 +1032,36 @@ def _table_regions(page, excluded_rule_ys: frozenset = frozenset()) -> list[tupl
     # 2개로 잘못 세져 "위쪽에 진짜 표/캡션이 하나 더 있다"고 오인하고,
     # 캡션 바로 아래로 한참 이어지는 진짜 알고리즘 본문(줄 번호가 매겨진
     # 의사코드)을 놓친다. y좌표를 반올림해 중복을 지우고 나서 세야 한다.
-    rules = sorted({round(y, 1) for y in _horizontal_rules(page)} - excluded_rule_ys)
+    raw_rules = [(round(y, 1), x0, x1) for y, x0, x1 in _horizontal_rules(page)
+                 if round(y, 1) not in excluded_rule_ys]
     page_bottom = page.rect.height
+    # ⚠️ **캡션 하나가 이미 다른 표가 쓰고 있는 괘선 묶음을 또 골라 갈 수
+    # 있다** — 위 grid_captions 처리 때와 같은 문제가 괘선 기반 판단에도
+    # 있다(실측: "Table 5"·"Table 6"이 둘 다 캡션이 내용 위에 오는데,
+    # Table 6 캡션 바로 위에 있는 괘선 3개는 사실 Table 5 자신의
+    # 괘선이다 — Table 6의 진짜 괘선은 그보다 훨씬 아래(다음 섹션
+    # 직전)에 있는데 "간격이 더 가깝다"는 이유만으로 Table 5의 괘선을
+    # 잘못 골라, Table 6 크롭 이미지 위쪽에 Table 5 데이터가 통째로
+    # 중복돼 나온다). 캡션을 문서 순서대로 처리하면서, 이미 어떤 표가
+    # 자기 것으로 확정한 괘선은 뒤 캡션의 후보에서 뺀다.
+    #
+    # ⚠️ **단, y좌표만으로 "이미 썼다"고 판단하면 좌우로 나란히 배치된
+    # 표/알고리즘을 망가뜨린다** — 이 경우 서로 다른 물리적 괘선이 우연히
+    # 같은 y에 그려질 뿐이라(실측: "Algorithm 1"·"Algorithm 2"), 왼쪽이
+    # 쓴 괘선을 오른쪽 것까지 다 썼다고 오인하면 오른쪽 알고리즘은 괘선을
+    # 하나도 못 찾아 영역 자체가 안 잡힌다. 캡션 자신의 가로 범위와
+    # 겹치는 괘선 조각만 "이 캡션이 쓴 것"으로 표시한다 — 같은 y라도
+    # 가로로 안 겹치면(좌/우 분리) 서로 다른 괘선으로 남는다.
+    used_rule_segments: list[tuple[float, float, float]] = []
+
+    def _rule_available(y: float, x0: float, x1: float) -> bool:
+        return not any(uy == y and _x_overlap(x0, x1, ux0, ux1) > 0
+                       for uy, ux0, ux1 in used_rule_segments)
+
     for _cap_x0, cap_y0, _cap_x1, cap_y1, label in ruled_captions:
         if label in merged:
             continue
+        rules = sorted({y for y, x0, x1 in raw_rules if _rule_available(y, x0, x1)})
         later_caption_tops = [y0 for _x0, y0, _x1, _y1, lbl in all_captions if y0 > cap_y0 and lbl != label]
         earlier_caption_bottoms = [y1 for _x0, _y0, _x1, y1, lbl in all_captions if y1 < cap_y0 and lbl != label]
         next_cap_top = min(later_caption_tops) if later_caption_tops else None
@@ -1049,8 +1112,15 @@ def _table_regions(page, excluded_rule_ys: frozenset = frozenset()) -> list[tupl
             # 조각을 감싸는 진짜 마지막 선)을 그대로 쓴다.
             bottom = below[1] if is_algorithm else below[-1]
             merged[label] = (cap_y0, bottom, 0.0, page_width)
+            consumed_ys = {y for y in below if y <= bottom}
         elif above_gap is not None:
             merged[label] = (above[0], cap_y1, 0.0, page_width)
+            consumed_ys = set(above)
+        else:
+            consumed_ys = set()
+        used_rule_segments.extend(
+            (y, x0, x1) for y, x0, x1 in raw_rules
+            if y in consumed_ys and _x_overlap(x0, x1, _cap_x0, _cap_x1) > 0)
 
     return [(top, bottom, x0, x1, label) for label, (top, bottom, x0, x1) in merged.items()]
 
