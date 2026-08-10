@@ -10,6 +10,7 @@
     detail  = get_paper_detail(paper_id)    # -> PaperDetail | None  (DB 조회만)
     reviews = get_paper_reviews(paper_id)   # -> list[ReviewDetail] | None
     revs    = get_paper_revisions(paper_id) # -> PaperRevisions | None (외부 API)
+    body    = get_paper_revisions_with_body(paper_id)  # -> PaperRevisions | None (+ 본문 diff, 외부 API)
     story   = get_paper_story(paper_id)     # -> PaperStory | None (외부 API + LLM)
     listing = list_papers(...)              # -> PaperListResponse (DB 조회만)
     title, abstract = extract_pdf_title_abstract(pdf_bytes)  # PDF -> (title, abstract)
@@ -37,6 +38,7 @@ __all__ = [
     "get_paper_detail",
     "get_paper_reviews",
     "get_paper_revisions",
+    "get_paper_revisions_with_body",
     "get_paper_story",
     "list_papers",
     "extract_pdf_title_abstract",
@@ -126,6 +128,18 @@ def get_paper_revisions(paper_id: int) -> "PaperRevisions | None":
     """
     from paper_assistant.query.revisions import get_paper_revisions as _fn
     return _fn(paper_id)
+
+
+def get_paper_revisions_with_body(paper_id: int, refresh: bool = False) -> "PaperRevisions | None":
+    """get_paper_revisions에 pdf 교체 지점마다 본문 전체 diff를 얹은 버전.
+
+    LLM은 쓰지 않는다 — pdf가 바뀐 지점마다 전후 PDF를 실제로 내려받아 텍스트를
+    뽑고(PyMuPDF) 단어 단위로 비교(difflib)하는 결정론적 계산이다. get_paper_revisions
+    보다 훨씬 비싸므로(리비전마다 PDF 다운로드+파싱) 결과를 캐시한다 — 두 번째
+    호출부터는 DB 조회 1번이다. refresh=True면 캐시를 무시하고 다시 만든다.
+    """
+    from paper_assistant.query.revisions import get_paper_revisions_with_body as _fn
+    return _fn(paper_id, refresh=refresh)
 
 
 def get_paper_story(paper_id: int, use_llm: bool | None = None,

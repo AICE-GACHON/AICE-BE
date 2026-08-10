@@ -53,6 +53,23 @@ def stub_revisions(monkeypatch):
 
 
 @pytest.fixture
+def stub_revisions_body(monkeypatch):
+    """`/revisions/body-diff`도 OpenReview(+PDF 다운로드)를 탄다 — rate limit 테스트에서
+    실제 호출을 막는다."""
+    from paper_assistant.schemas import PaperRevisions
+
+    calls: list[dict] = []
+
+    def _fake(paper_id, refresh=False):
+        calls.append({"paper_id": paper_id, "refresh": refresh})
+        return None if paper_id == 999_999 else PaperRevisions(
+            paper_id=paper_id, openreview_id="EzjsoomYEb", supported=True)
+
+    monkeypatch.setattr(corpus_router, "get_paper_revisions_with_body", _fake)
+    return calls
+
+
+@pytest.fixture
 def stub_detail(monkeypatch):
     """DB만 보는 조회. 상한이 여기까지 번지지 않는지 확인할 때 쓴다."""
     from paper_assistant.schemas import PaperDetail
@@ -170,3 +187,44 @@ def test_cheap_endpoints_are_not_rate_limited(client, stub_detail, rate_limit_on
     n = int(_EXTERNAL_CALL_LIMIT.split("/")[0]) + 5
     codes = {client.get("/api/papers/27030").status_code for _ in range(n)}
     assert codes == {200}
+
+
+# ------------------------------------------------------ /revisions/body-diff
+#
+# `/revisions`보다 훨씬 비싼 경로(pdf 교체마다 실제 다운로드+파싱)라 별도 rate limit과
+# 별도 라우터 계약을 갖는다. 조립 로직(attach_body_diffs 자체)은
+# tests/paper_assistant/test_revisions.py가 맡고, 여기는 라우터 계약만 본다.
+
+def test_revisions_body_diff_404_for_unknown_paper(client, stub_revisions_body):
+    assert client.get("/api/papers/999999/revisions/body-diff").status_code == 404
+
+
+def test_revisions_body_diff_defaults_to_the_cache(client, stub_revisions_body):
+    client.get("/api/papers/27030/revisions/body-diff")
+    assert stub_revisions_body[0]["refresh"] is False
+
+
+def test_revisions_body_diff_anonymous_refresh_is_rejected(client, stub_revisions_body):
+    """`/story`와 같은 이유 — refresh=true는 캐시를 우회하므로 비로그인이면 거절한다."""
+    res = client.get("/api/papers/27030/revisions/body-diff?refresh=true")
+    assert res.status_code == 401
+    assert stub_revisions_body == [], "거절했는데 비싼 함수를 불렀다"
+
+
+def test_revisions_body_diff_logged_in_refresh_is_passed_through(
+        client, auth, stub_revisions_body):
+    res = client.get("/api/papers/27030/revisions/body-diff?refresh=true",
+                     headers=auth["headers"])
+    assert res.status_code == 200
+    assert stub_revisions_body[0]["refresh"] is True
+
+
+def test_revisions_body_diff_is_rate_limited(client, stub_revisions_body, rate_limit_on):
+    """`/revisions`(30/hour)보다 엄격한 자체 상한(10/hour)이 걸려 있어야 한다."""
+    from app.routers.corpus import _BODY_DIFF_CALL_LIMIT
+
+    allowed = int(_BODY_DIFF_CALL_LIMIT.split("/")[0])
+    codes = [client.get("/api/papers/27030/revisions/body-diff").status_code
+             for _ in range(allowed + 1)]
+    assert codes[:allowed] == [200] * allowed
+    assert codes[-1] == 429, "상한을 넘겼는데 통과했다"
