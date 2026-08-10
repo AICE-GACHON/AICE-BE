@@ -41,11 +41,18 @@ class SignupRequest(BaseModel):
     email: EmailStr
     password: NewPassword = Field(min_length=8)
     nickname: str = Field(min_length=1, max_length=50)
-    # 서비스가 OpenReview 코퍼스 기반이라 가입 시점에 필수로 받는다.
-    openreview_id: str = Field(min_length=1, max_length=100)
+    # 예전에는 가입 시점에 필수였다. **베타에서는 받지 않는다** — 지금 이 값을
+    # 읽는 기능이 하나도 없는데(모델 주석: "나중에 쓸 신원 값") 가입 문턱만
+    # 높이고 있었다. 안 보내면 서버가 고유한 자리표시자를 만들어 넣는다
+    # (컬럼이 unique·not null이라 비워둘 수는 없다). 나중에 프로필 수정으로
+    # 진짜 ID를 넣을 수 있다.
+    openreview_id: str | None = Field(default=None, max_length=100)
     # 회원가입 전 POST /api/onboarding으로 익명 저장해둔 답변을 이 계정에 연결한다.
     # 없거나 잘못된 값이어도 가입 자체는 막지 않는다 (부가 기능일 뿐).
     onboarding_id: uuid.UUID | None = None
+    # SIGNUP_INVITE_CODE가 설정된 배포에서만 필요하다. 비어 있으면(개발 기본값)
+    # 이 필드는 무시된다. 길이 상한은 비교 전에 거대한 문자열을 받지 않기 위한 것.
+    invite_code: str | None = Field(default=None, max_length=200)
 
 
 class LoginRequest(BaseModel):
@@ -58,11 +65,15 @@ class LoginRequest(BaseModel):
 class GoogleLoginRequest(BaseModel):
     """프론트(Google Identity Services 등)가 발급받은 id_token을 그대로 전달한다.
 
-    처음 구글로 가입하는 경우에만 openreview_id가 필요하다 (이미 연동된 계정이거나
-    같은 이메일의 기존 계정에 연동되는 경우는 필요 없음).
+    베타에서는 신규 가입에도 openreview_id를 요구하지 않는다 — 보내면 쓰고,
+    없으면 서버가 자리표시자를 만든다 (app/routers/auth.py).
     """
     id_token: str = Field(max_length=_MAX_TOKEN_LEN)
     openreview_id: str | None = Field(default=None, min_length=1, max_length=100)
+    # invite_code는 **처음 구글로 가입할 때만** 필요하다.
+    # 이미 있는 계정의 로그인/연동에는 요구하지 않는다 (초대받아 가입한 사람이
+    # 로그인할 때마다 코드를 다시 입력해야 한다면 그건 초대가 아니라 비밀번호다).
+    invite_code: str | None = Field(default=None, max_length=200)
 
 
 class RefreshRequest(BaseModel):

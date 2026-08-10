@@ -100,8 +100,13 @@ def _fetch_timeline(openreview_id: str, forum_id: str | None, venue: str,
     if base is None:
         return [], False, [f"{venue}는 심사 이력을 조회할 수 없는 학회입니다."]
 
-    client = get_client(base)
     try:
+        # get_client도 try 안에 있어야 한다. 밖에 두면 **자격증명이 없을 때
+        # RuntimeError가 그대로 올라가 500이 된다** — 배포에서 실제로 그랬다.
+        # 이 함수는 "외부 API 실패는 예외로 올리지 않는다"고 약속하고 있고,
+        # 자격증명이 없는 것도 조회할 수 없는 사정 중 하나다. 심사 이력은
+        # 부가 정보이므로 없으면 없는 대로 보여주고 페이지는 살린다.
+        client = get_client(base)
         # 포럼은 forum_id 기준이지만 미수집 논문이 있어 openreview_id로 폴백한다
         # (detail.get_paper_detail의 forum 폴백과 같은 사정).
         replies = client.get_forum_replies(forum_id or openreview_id)

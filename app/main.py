@@ -15,6 +15,20 @@ from app.schemas.common import ApiResponse
 
 log = logging.getLogger(__name__)
 
+# 루트 로거에 핸들러를 붙인다. 이게 없으면 uvicorn이 제 로거만 설정하고 끝나서
+# **앱이 남기는 log.info가 통째로 사라진다** — 배포 후 실제로 겪었다. 워밍업이
+# 돌았는데 "워밍업 완료"가 안 찍혔고, PDF 업로드가 88초를 쓰고 실패했을 때
+# LLM을 탔는지 추출이 부실했는지 알 방법이 없었다. WARNING만 lastResort로
+# stderr에 나오던 상태라, 정상 동작의 흔적이 아무것도 남지 않았다.
+#
+# force=True인 이유: uvicorn이 먼저 로깅을 건드린 뒤에 이 모듈이 임포트되므로
+# 그것을 덮어써야 실제로 적용된다.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    force=True,
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -1,0 +1,66 @@
+# paperaireview.com — TLS 종료 + 프론트 정적 서빙 + /api 프록시.
+#
+# 프론트를 같은 도메인에서 서빙한다 (docs/배포_계획.md D2). 같은 오리진이라
+# **CORS 프리플라이트가 아예 없고**, 도메인 1개·인증서 1개로 끝난다.
+{
+	# Let's Encrypt 계정 이메일. 인증서 만료 임박 알림이 여기로 온다.
+	# ⚠️ 배포 전에 실제 주소로 바꿀 것. 비워두면 만료를 아무도 모른다.
+	email ops@paperaireview.com
+}
+
+# www로 들어온 요청은 apex로 넘긴다.
+# ⚠️ Cloudflare에 www A(또는 CNAME) 레코드도 있어야 이 블록이 의미가 있다.
+#    없으면 인증서 발급 단계에서 www 검증이 실패해 **전체 발급이 막힌다** —
+#    당장 www를 안 쓸 거면 이 블록을 통째로 지우는 편이 안전하다.
+www.paperaireview.com {
+	redir https://paperaireview.com{uri} permanent
+}
+
+paperaireview.com {
+	encode zstd gzip
+
+	# 앱의 본문 상한은 MAX_REQUEST_BYTES=24MB다(app/core/config.py). 여기는
+	# 일부러 조금 위에 둔다 — 경계 근처 요청을 앱까지 보내서 **앱이 만든 JSON
+	# 413**을 받게 하려는 것이다. Caddy가 먼저 자르면 프론트는 파싱할 수 없는
+	# 응답을 받는다. 그보다 훨씬 큰 것만 여기서 일찍 끊는다.
+	request_body {
+		max_size 32MB
+	}
+
+	# --------------------------------------------------------------- API
+	#
+	# X-Forwarded-For / -Proto / -Host는 Caddy가 알아서 붙인다. 명시적으로
+	# header_up을 쓰면 "불필요하다"는 경고가 나므로 적지 않는다.
+	#
+	# Caddy는 X-Forwarded-For에 **클라이언트 IP를 덧붙인다**. 이게 중요하다 —
+	# app/core/rate_limit.py는 그 헤더의 **맨 오른쪽** 값을 진짜 클라이언트로
+	# 본다. 클라이언트가 헤더를 지어내 보내도 Caddy가 실제 IP를 오른쪽에
+	# 붙이므로 위조가 통하지 않는다.
+	#
+	# 🔴 이 규칙은 **프록시 홉이 정확히 하나**일 때만 성립한다. Cloudflare
+	#    프록시(주황 구름)를 켜면 홉이 하나 더 생겨 맨 오른쪽 값이 Cloudflare
+	#    엣지 IP가 되고, 그러면 전 사용자가 rate limit 바구니 하나를 공유한다 —
+	#    로그인 30/hour가 서비스 전체 합쳐 30회가 된다. DNS는 반드시
+	#    "DNS only"(회색 구름)로 둘 것 (docs/배포_계획.md D9).
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# --------------------------------------------------- 프론트엔드 (SPA)
+	handle {
+		root * /srv/www
+		# SPA라 없는 경로는 index.html로 넘겨 클라이언트 라우터가 처리하게 한다.
+		try_files {path} /index.html
+		file_server
+	}
+
+	# HSTS는 앱이 production일 때 직접 보낸다(app/main.py). 여기서 또 넣으면
+	# 헤더가 두 번 나가고, 껐다 켜는 지점이 두 곳으로 갈라진다.
+
+	log {
+		output file /data/access.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}

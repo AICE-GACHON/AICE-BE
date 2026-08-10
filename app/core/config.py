@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     # 항상 401을 반환한다 (google_oauth.verify_google_id_token).
     GOOGLE_CLIENT_ID: str = ""
 
+    # 가입 초대 코드. 비어 있으면 가입이 **누구에게나 열려 있다**(개발 기본값).
+    # 값이 있으면 이메일 가입과 구글 **신규** 가입 양쪽이 이 코드를 요구한다
+    # (app/routers/auth.py). 이미 있는 계정의 로그인에는 영향이 없다.
+    #
+    # 이것이 LLM 예산의 경계다. 돈이 나가는 경로(분석, /story?refresh=true)가
+    # 전부 로그인 뒤에 있으므로, 가입을 잠그면 "로그인한 사람 = 초대된 사람"이
+    # 성립한다 (docs/배포_계획.md D5).
+    SIGNUP_INVITE_CODE: str = ""
+
     # OpenReview 계정 — 논문 코퍼스 재수집 배치(scripts/, paper_assistant/ingest/)에서만
     # 쓴다. 코퍼스는 이미 적재돼 있어 서버 운영에는 비어 있어도 된다.
     # 실제로 이 값을 읽는 쪽은 paper_assistant/config.py다.
@@ -209,6 +218,52 @@ class Settings(BaseSettings):
             problems.append(
                 "ALLOWED_HOSTS가 '*'입니다. 서비스할 도메인을 명시하세요 "
                 '(예: ALLOWED_HOSTS=["api.example.com"]).')
+
+        # LLM을 켠 채 가입이 열려 있으면 **아무나 계정을 만들어 돈을 쓸 수 있다**.
+        # 분석 1회가 약 $0.30이고 청구는 우리 카드로 온다. 다른 항목들이 '틀리면
+        # 공개되는' 종류라면 이건 '틀리면 청구되는' 종류다.
+        #
+        # LLM이 꺼져 있으면(스텁, $0) 막지 않는다 — 가입을 열어둔 채 화면 흐름만
+        # 보여주는 것은 정상적인 배포 형태다. 위험한 것은 두 조건의 **조합**뿐이라,
+        # 조합에만 건다.
+        if self.USE_LLM and not self.SIGNUP_INVITE_CODE.strip():
+            problems.append(
+                "PAPER_ASSISTANT_USE_LLM=1인데 SIGNUP_INVITE_CODE가 비어 있습니다. "
+                "가입이 열려 있어 누구나 계정을 만들어 분석(1회 약 $0.30)을 돌릴 수 "
+                "있습니다. 초대 코드를 정하거나, LLM을 끄고 배포하세요.")
+
+        # 메일은 **없다고 기동을 막지 않는다.** 위 항목들은 틀리면 공개되거나(CORS,
+        # ALLOWED_HOSTS) 청구되는(초대 코드) 종류지만, SMTP가 비어 있는 것은 기능
+        # 하나가 꺼진 상태일 뿐이고 이미 시끄럽게 실패한다 — production이면
+        # /password/forgot이 503이다(app/core/mail.py). 그것 때문에 분석·검색까지
+        # 통째로 내리는 것은 손해가 더 크다.
+        #
+        # 대신 **절반만 채운 설정**은 막는다. 이쪽이 진짜 조용한 실패다:
+        #   - SMTP_FROM을 MAIL_FROM으로 잘못 쓰면(extra="ignore") 무시되고 빈 채로
+        #     남아, 다 설정한 줄 알았는데 발송 조건이 불성립이라 전부 503이 된다.
+        #   - FRONTEND_BASE_URL이 localhost로 남으면 메일은 정상 발송되는데
+        #     **링크가 전부 깨진 채로 나간다.** 이미 나간 메일은 주워 담을 수 없다.
+        mail_values = [self.SMTP_HOST, self.SMTP_USER, self.SMTP_PASSWORD, self.SMTP_FROM]
+        if any(v.strip() for v in mail_values):
+            missing = [name for name, value in
+                       (("SMTP_HOST", self.SMTP_HOST), ("SMTP_FROM", self.SMTP_FROM))
+                       if not value.strip()]
+            if missing:
+                problems.append(
+                    f"SMTP 설정이 일부만 채워져 있습니다 (비어 있음: {', '.join(missing)}). "
+                    "발송에는 SMTP_HOST와 SMTP_FROM이 **둘 다** 필요합니다 — 하나라도 "
+                    "비면 재설정 메일이 전부 503입니다. "
+                    "보내는 주소 키 이름은 MAIL_FROM이 아니라 SMTP_FROM입니다.")
+            if self.SMTP_USER.strip() and not self.SMTP_PASSWORD.strip():
+                problems.append(
+                    "SMTP_USER는 있는데 SMTP_PASSWORD가 비어 있습니다. 인증에 실패하면 "
+                    "발송 예외는 삼켜지고(계정 존재 여부를 숨기려는 설계) 사용자에게는 "
+                    "200이 나갑니다 — 메일은 오지 않는데 성공으로 보입니다.")
+            base = self.FRONTEND_BASE_URL
+            if "localhost" in base or "127.0.0.1" in base or base.startswith("http://"):
+                problems.append(
+                    f"메일을 켰는데 FRONTEND_BASE_URL이 개발용입니다: {base!r}. "
+                    "재설정 링크가 이 값으로 만들어져 나가므로 받는 사람은 열 수 없습니다.")
 
         if problems:
             raise ValueError(

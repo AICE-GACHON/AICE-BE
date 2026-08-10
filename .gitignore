@@ -8,7 +8,15 @@ venv/
 env/
 
 # Environment variables
+#
+# ⚠️ `.env` 하나만 적으면 .env.production / .env.local 같은 파일이 그대로
+#    커밋된다. 배포용 파일에는 JWT 시크릿·RDS 비번·ANTHROPIC_API_KEY가 들어
+#    있어서, 한 번 올라가면 히스토리에서 지우는 것으로는 유출을 되돌릴 수 없다
+#    (전부 새로 발급해야 한다). 그래서 전부 막고 예시 파일만 예외로 둔다.
 .env
+.env.*
+!.env.example
+!.env.production.example
 
 # IDE
 .vscode/

@@ -67,14 +67,15 @@ def test_google_login_invalid_token_returns_401(client, monkeypatch):
     assert _google_login(client).status_code == 401
 
 
-def test_google_login_new_user_requires_openreview_id(client, google_claims):
+def test_google_login_new_user_without_openreview_id_succeeds(client, google_claims):
+    """베타에서는 구글 신규 가입에도 openreview_id를 요구하지 않는다.
+
+    예전에는 400으로 되돌려보내 프론트가 ID를 입력받아 재시도하게 했다. 지금
+    프론트가 그 자리에서 받는 것은 **초대 코드뿐**이다(403 분기).
+    """
     google_claims(_fake_claims())
     res = _google_login(client)
-    assert res.status_code == 400
-    # 프론트(AICE-FE src/api/auth.js loginWithGoogle)가 이 메시지에 'openreview_id'가
-    # 들어 있는지로 "ID를 입력받아 같은 토큰으로 재시도" 분기를 탄다 — 문구를 바꾸면
-    # 프론트의 최초 가입 플로우가 조용히 깨진다.
-    assert "openreview_id" in res.json()["error"]["message"]
+    assert res.status_code == 200, res.text
 
 
 def test_google_login_new_user_creates_linked_account(client, google_claims):

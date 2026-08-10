@@ -1,0 +1,85 @@
+# 배포용 구성. 로컬 개발은 docker-compose.yml(Postgres만)을 그대로 쓴다.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# **db 서비스가 없다.** DB는 RDS다 (docs/배포_계획.md D3). DATABASE_URL이
+# RDS 엔드포인트를 가리키고 ?sslmode=require가 붙어 있어야 한다.
+
+name: aice
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aice-api:latest
+    restart: unless-stopped
+
+    # 비밀값은 이미지가 아니라 여기서 주입한다. 이 파일은 서버에만 두고
+    # git에는 올리지 않는다 (.env.production.example을 복사해 채울 것).
+    env_file:
+      - .env.production
+
+    environment:
+      # 모델 가중치는 이미지에 구워져 있다. 오프라인으로 못박아 두면 런타임에
+      # Hugging Face로 나가는 경로가 아예 사라진다 — HF 장애가 우리 장애가
+      # 되지 않는다는 것을 설정으로 보장한다 (Dockerfile 4)에서 검증됨).
+      HF_HUB_OFFLINE: "1"
+
+    # 포트를 호스트에 열지 않는다. Caddy만 이 컨테이너에 닿으면 된다 —
+    # 8000을 호스트에 노출하면 TLS를 우회하는 평문 경로가 생긴다.
+    expose:
+      - "8000"
+
+    # t4g.medium은 4GB다. API가 다 먹고 호스트를 굶기지 않도록 상한을 둔다.
+    # torch+SPECTER2 상주가 ~2.5GB이므로(docs/배포_계획.md §1.2) 3GB면
+    # 정상 동작에는 여유가 있고, 새는 경우에는 컨테이너만 죽는다.
+    mem_limit: 3g
+
+    # 배포 시 진행 중이던 분석에 시간을 조금 준다. 분석은 BackgroundTasks라
+    # API 프로세스에 묶여 있어서(docs/배포_계획.md §1.3) 재시작이 곧 작업 중단이다.
+    # ⚠️ 이 값이 문제를 **해결하지는 못한다** — 분석은 몇 분씩 걸리므로 60초로는
+    #    대부분 못 끝낸다. STALE_AFTER=15분이 DB 행을 회수하지만 사용자는 실패를
+    #    본다. 그래서 배포는 한산한 시간에 한다.
+    stop_grace_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+
+    ports:
+      - "80:80"       # ACME HTTP-01 챌린지 + https 리다이렉트에 필요하다
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+      # 프론트엔드 빌드 산출물. AICE-FE에서 `npm run build`한 dist/를 서버의
+      # 이 경로에 올린다 (별도 저장소라 이미지에 넣지 않는다).
+      - ./frontend-dist:/srv/www:ro
+
+      # 🔴 발급받은 TLS 인증서가 여기 있다. 이 볼륨을 날리면 재발급을 받는데,
+      #    Let's Encrypt에는 발급 상한이 있어서 반복하면 한동안 인증서를 못 받는다.
+      #    컨테이너를 지울 때 `docker compose down -v`를 쓰지 말 것.
+      - caddy_data:/data
+      - caddy_config:/config
+
+    depends_on:
+      - api
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  caddy_data:
+  caddy_config:
