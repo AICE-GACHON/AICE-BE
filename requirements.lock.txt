@@ -1,0 +1,146 @@
+# 배포 이미지 전용 락파일. **손으로 고치지 말 것** (갱신 방법은 아래).
+#
+# requirements.txt는 하한(>=)만 쓴다 — 로컬 개발에는 그게 맞다. 하지만 배포
+# 이미지에는 맞지 않는다. 언제 빌드하느냐에 따라 다른 버전이 들어가서 "어제 되던
+# 이미지가 오늘 안 된다"를 재현할 수 없다. 이 파일이 그 조합을 못박는다.
+#
+# ------------------------------------------------------------ 어디서 떴나
+#
+# 2026-08-11, **프로덕션에서 실제로 돌고 있던 컨테이너**에서 떴다. 임의로 고른
+# 버전 조합이 아니라 실사용으로 검증된 조합이라는 뜻이다.
+#
+#   ssh ubuntu@paperaireview.com
+#   cd ~/AICE-BE
+#   docker compose -f docker-compose.prod.yml exec -T api pip freeze > requirements.lock.txt
+#
+#   당시 상태: main @ 022964c, aice-api:latest, Up 2 days (healthy)
+#   환경:      linux/aarch64 (t4g.medium), CPython 3.13
+#
+# ------------------------------------------------------------ 어디에 쓰나
+#
+# **Dockerfile(배포 이미지)만 이 파일을 쓴다.**
+#
+# 로컬 개발과 CI는 그대로 requirements.txt / requirements-dev.txt를 쓴다. 옮기면
+# 안 된다 — 이 락은 linux/aarch64 + cp313에서 뜬 것이라 다른 플랫폼에서는 맞지
+# 않는다(uvloop은 Windows 휠이 아예 없다). CI가 x86 러너에서 하한으로 도는 것은
+# 손해가 아니라 이득이다. 새 버전이 우리 코드를 깨는 것을 배포 전에 잡아준다.
+#
+# ------------------------------------------------------------ 🔴 torch 함정
+#
+# `torch==2.13.0+cpu`는 **PyPI에 없다.** `+cpu`는 CPU 전용 인덱스에만 있는 로컬
+# 버전 태그다. 그래서 Dockerfile은 2단계 구조를 유지해야 한다.
+#
+#   1) pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0+cpu
+#   2) pip install -r requirements.lock.txt      ← 이미 깔린 torch를 보고 건너뛴다
+#
+# ⚠️ **1)의 핀과 아래 torch 줄은 항상 같이 움직여야 한다.** 1)에서 핀을 빼면
+#    최신 torch가 들어오고, 2)가 없는 2.13.0+cpu로 다운그레이드를 시도하다 죽는다.
+#    (검증: manylinux_2_28_aarch64 휠이 인덱스에 있는 것을 확인했다)
+#
+# ------------------------------------------------------------ 갱신 방법
+#
+# 의존성을 올릴 때는 이 파일을 직접 고치지 말고:
+#
+#   1. requirements.txt의 하한을 고친다 (필요하면)
+#   2. 락 없이 한 번 빌드해 돌려본다
+#   3. 그 컨테이너에서 다시 freeze를 떠 이 파일을 통째로 교체한다
+#   4. torch 버전이 바뀌었으면 Dockerfile 1)의 핀도 같이 고친다
+#
+# requirements.txt에 패키지를 추가하고 이 파일을 갱신하지 않으면, 빌드는 성공하고
+# **런타임에 ImportError로 죽는다.** Dockerfile이 그 어긋남을 빌드 실패로 바꾼다.
+
+adapters==1.3.0
+alembic==1.19.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==0.121.0
+anyio==4.14.2
+bcrypt==4.0.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.4.9
+click==8.4.2
+cryptography==50.0.0
+Deprecated==1.3.1
+distro==1.9.0
+dnspython==2.8.0
+docstring_parser==0.18.0
+ecdsa==0.19.2
+email-validator==2.3.0
+fastapi==0.141.1
+filelock==3.29.0
+fsspec==2026.4.0
+google-auth==2.56.3
+greenlet==3.5.4
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+huggingface_hub==0.36.2
+idna==3.18
+Jinja2==3.1.6
+jiter==0.16.0
+jsonpatch==1.33
+jsonpointer==3.1.1
+langchain-core==1.5.3
+langchain-protocol==0.0.18
+langgraph==1.2.10
+langgraph-checkpoint==4.2.0
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.2
+langsmith==0.10.17
+limits==5.8.0
+Mako==1.4.1
+MarkupSafe==3.0.3
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.5.1
+orjson==3.11.9
+ormsgpack==1.12.2
+packaging==26.3
+passlib==1.7.4
+pgvector==0.5.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.15.0
+pydantic_core==2.46.4
+PyJWT==2.13.0
+pymupdf==1.28.2
+python-dotenv==1.2.2
+python-jose==3.5.0
+python-multipart==0.0.32
+PyYAML==6.0.3
+regex==2026.7.19
+requests==2.34.2
+requests-toolbelt==1.0.0
+rsa==4.9.1
+safetensors==0.8.0
+setuptools==78.1.0
+six==1.17.0
+slowapi==0.1.10
+sniffio==1.3.1
+SQLAlchemy==2.0.51
+starlette==1.4.1
+sympy==1.14.0
+tenacity==9.1.4
+tokenizers==0.22.2
+torch==2.13.0+cpu
+tqdm==4.70.0
+transformers==4.57.6
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+urllib3==2.7.0
+uuid_utils==0.17.0
+uvicorn==0.52.1
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==15.0.1
+wrapt==2.3.0
+xxhash==3.8.1
+zstandard==0.25.0

@@ -36,22 +36,30 @@ WORKDIR /app
 
 # ------------------------------------------------------------ 1) torch (CPU 빌드)
 #
-# 반드시 requirements.txt보다 **먼저**, CPU 인덱스에서 받는다. 순서를 바꾸면
-# requirements의 `torch>=2.9`가 기본 PyPI에서 CUDA 런타임까지 딸린 2GB+ 빌드를
-# 끌어온다. 이 서비스는 GPU를 쓰지 않는다 (requirements.txt 상단 주석).
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch
+# 반드시 requirements보다 **먼저**, CPU 인덱스에서 받는다. 순서를 바꾸면
+# `torch>=2.9`가 기본 PyPI에서 CUDA 런타임까지 딸린 2GB+ 빌드를 끌어온다.
+# 이 서비스는 GPU를 쓰지 않는다 (requirements.txt 상단 주석).
+#
+# 🔴 **이 핀은 requirements.lock.txt의 torch 줄과 항상 같이 움직여야 한다.**
+#    `+cpu`는 PyPI에 없고 이 인덱스에만 있는 로컬 버전 태그다. 여기서 핀을 빼면
+#    최신 torch가 들어오고, 다음 단계의 락이 없는 2.13.0+cpu로 다운그레이드를
+#    시도하다 죽는다. 반대로 락만 올리고 여기를 안 고쳐도 같은 곳에서 죽는다.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0+cpu
 
 # ------------------------------------------------------------ 2) 나머지 의존성
 #
-# requirements.txt만 먼저 복사한다 — 앱 코드가 바뀌어도 이 레이어는 캐시된다.
+# 락파일만 먼저 복사한다 — 앱 코드가 바뀌어도 이 레이어는 캐시된다.
 #
-# ⚠️ requirements.txt는 의도적으로 하한(>=)만 쓴다. 로컬 개발에는 맞지만 배포
-#    이미지에는 맞지 않는다 — 언제 빌드하느냐에 따라 다른 버전이 들어가서
-#    "어제 되던 이미지가 오늘 안 된다"를 재현할 수 없다. 검증된 환경에서
-#    `pip freeze > requirements.lock.txt`를 뜬 뒤 아래 줄을 그것으로 바꿀 것
-#    (docs/배포_계획.md §5.1).
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+# **requirements.txt가 아니라 락을 쓴다.** requirements.txt는 의도적으로 하한(>=)만
+# 두는데, 그러면 언제 빌드하느냐에 따라 다른 버전이 들어가서 "어제 되던 이미지가
+# 오늘 안 된다"를 재현할 수 없다. 자동 배포에서는 이게 특히 아프다 — 코드를 안
+# 건드린 배포가 의존성만으로 깨진다.
+#
+# 락은 2026-08-11 프로덕션 컨테이너에서 떴다. 갱신 방법은 그 파일 상단 주석에 있다.
+# 여기서 requirements.txt를 같이 복사하지 않는 이유는 캐시다 — 하한을 한 줄
+# 고칠 때마다 3)의 모델 440MB를 다시 받게 된다. 둘의 어긋남은 5)에서 검사한다.
+COPY requirements.lock.txt ./
+RUN pip install -r requirements.lock.txt
 
 # ------------------------------------------------------------ 3) 모델 가중치 굽기
 #
@@ -114,6 +122,43 @@ assert ADAPTERS["proximity"] == baked["proximity"], (
     f"Dockerfile이 굽는 adapter({baked['proximity']})와 specter2.py의 "
     f"ADAPTERS['proximity']({ADAPTERS['proximity']})가 다르다.")
 print("모델 상수 일치 확인")
+PY
+
+# 락을 쓰면서 생긴 새 함정을 막는다: **requirements.txt에 패키지를 추가하고 락을
+# 갱신하지 않으면 빌드는 멀쩡히 성공하고 런타임에 ImportError로 죽는다.** 2)가 더는
+# requirements.txt를 보지 않기 때문이다. 그 사고를 여기서 빌드 실패로 바꾼다.
+#
+# 5)에 두는 것도 캐시 때문이다 — 2)에 두면 하한을 한 줄 고칠 때마다 모델을 다시 받는다.
+#
+# ⚠️ extras는 검사하지 못한다. `uvicorn[standard]`에서 uvloop이 빠져도 uvicorn
+#    자체는 설치돼 있으므로 이 검사를 통과한다.
+RUN python - <<'PY'
+import importlib.metadata as md
+
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+drift = []
+with open("requirements.txt", encoding="utf-8") as f:
+    for raw in f:
+        line = raw.split("#")[0].strip()
+        if not line:
+            continue
+        req = Requirement(line)
+        try:
+            installed = md.version(req.name)
+        except md.PackageNotFoundError:
+            drift.append(f"{req.name}: 설치되지 않았다 (락에 없다)")
+            continue
+        # torch는 2.13.0+cpu처럼 로컬 버전 태그가 붙으므로 base_version으로 본다.
+        if not req.specifier.contains(Version(installed).base_version, prereleases=True):
+            drift.append(f"{req.name}: 설치된 {installed}이 '{req.specifier}'를 만족하지 않는다")
+
+assert not drift, (
+    "requirements.txt와 requirements.lock.txt가 어긋났다:\n  "
+    + "\n  ".join(drift)
+    + "\n\n락파일을 갱신할 것 — 방법은 requirements.lock.txt 상단 주석에 있다.")
+print("requirements.txt ↔ 락파일 일치 확인")
 PY
 
 # ------------------------------------------------------------ 6) 기동
