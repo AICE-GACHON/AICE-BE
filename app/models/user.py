@@ -7,6 +7,16 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
+# openreview_id 자리표시자의 접두사. 베타에서는 가입 시 이 값을 받지 않는데
+# 컬럼이 unique·not null이라 비워둘 수 없어서, 계정마다 고유한
+# `pending:{uuid4}`를 넣는다 (app/routers/auth.py _openreview_id_or_placeholder).
+#
+# **이것은 DB 사정이지 API 계약이 아니다.** 밖으로 내보낼 때는 숨긴다
+# (app/schemas/auth.py UserResponse). 만드는 쪽과 숨기는 쪽이 각자 문자열을
+# 들고 있으면 한쪽만 바뀔 때 조용히 어긋나므로 — 화면에 `pending:9f3c…`가
+# 그대로 찍혀도 아무도 예외를 못 본다 — 정의를 여기 한 곳에만 둔다.
+OPENREVIEW_ID_PENDING_PREFIX = "pending:"
+
 
 class User(Base):
     """
@@ -43,3 +53,22 @@ class User(Base):
     def google_linked(self) -> bool:
         """UserResponse.model_validate(user)가 읽는 계산 필드. 실제 컬럼이 아니다."""
         return self.google_sub is not None
+
+    @property
+    def has_password(self) -> bool:
+        """비밀번호로 로그인할 수 있는 계정인지. 계산 필드다 (컬럼 아님).
+
+        **google_linked로는 이걸 알 수 없다.** 이메일로 가입한 뒤 같은 이메일로
+        구글 로그인을 하면 google_sub가 채워지므로(routers/auth.py google_login),
+        `google_linked=True`인데 비밀번호도 멀쩡히 있는 계정이 존재한다. 즉
+        "구글 연동됨"과 "구글 전용(비밀번호 없음)"은 다른 말이다.
+
+        프론트가 이 구분을 못 하면 두 화면이 동시에 틀어진다:
+          - 비밀번호 변경 UI — 구글 전용 계정에 띄우면 400만 받고 끝난다
+            (routers/user.py update_me). 반대로 숨기면 바꿀 수 있는 사람이 못 바꾼다.
+          - 탈퇴 확인 — 비밀번호가 있는 계정은 body에 password가 **필수**다.
+            안 보내면 400이고, 구글 전용 계정에 입력칸을 띄우면 채울 값이 없다.
+
+        password_hash 자체는 절대 내보내지 않는다. 있고 없고만 알려준다.
+        """
+        return self.password_hash is not None
