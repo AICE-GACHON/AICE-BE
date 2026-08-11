@@ -47,9 +47,38 @@ paperaireview.com {
 	}
 
 	# --------------------------------------------------- 프론트엔드 (SPA)
+	root * /srv/www
+
+	# 번들은 파일명에 내용 해시가 박혀 나온다 (index-Cv6_PEv1.js). 내용이 바뀌면
+	# 이름이 바뀌므로 브라우저가 낡은 것을 붙잡을 방법이 없다 — 영구 캐시해도 안전하다.
+	#
+	# 이 블록에는 **일부러 try_files를 두지 않는다.** 없는 번들에 index.html을
+	# 돌려주면, 자바스크립트를 기대한 브라우저가 HTML을 받아 "예상치 못한 토큰 '<'"
+	# 같은 엉뚱한 오류를 낸다. 진짜 404를 줘야 무엇이 없는지 바로 보인다.
+	# 🔴 실제로 있는 파일에만 붙인다. 404에까지 붙으면 그 404가 1년간 캐시되어,
+	#    배포 중 잠깐 없었던 파일이 그 브라우저에서는 영영 없는 파일이 된다.
+	@bundle {
+		path /assets/*
+		file
+	}
+	handle /assets/* {
+		header @bundle Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
 	handle {
-		root * /srv/www
+		# 🔴 index.html은 캐시하면 안 된다. 이 파일만이 지금 어떤 번들을 써야 하는지
+		#    알고 있어서, 낡은 사본을 붙잡으면 배포 때 지워진 번들을 가리킨 채로
+		#    남는다 — 사용자에게는 그냥 빈 화면이다. Cache-Control이 아예 없으면
+		#    브라우저가 임의로 캐시 기간을 정하므로(휴리스틱 캐싱) 명시해야 한다.
+		#
+		#    no-cache는 "저장하지 마라"가 아니라 "쓰기 전에 물어봐라"다. 바뀌지
+		#    않았으면 304로 끝나서 비용은 왕복 한 번뿐이다. 이 블록이 같이 받는
+		#    favicon·icons.svg는 이름이 고정이라 어차피 영구 캐시하면 안 된다.
+		header Cache-Control "no-cache"
+
 		# SPA라 없는 경로는 index.html로 넘겨 클라이언트 라우터가 처리하게 한다.
+		# /login, /signup, /app/*, /reset-password를 새로고침해도 404가 나지 않는 이유다.
 		try_files {path} /index.html
 		file_server
 	}

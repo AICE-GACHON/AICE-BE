@@ -1,0 +1,28 @@
+# 줄바꿈은 저장소 안에서도, 체크아웃한 작업트리에서도 **항상 LF**로 둔다.
+#
+# 이게 없으면 Windows 체크아웃에서 작업트리가 CRLF가 된다. 인덱스는 LF라
+# git 입장에서는 아무 문제가 없지만, **작업트리 파일을 리눅스로 직접 복사하는
+# 순간** 문제가 된다. 실제로 두 가지를 밟았다.
+#
+#   1) `scripts/*.sh` — CRLF면 리눅스에서 그냥 깨진다. shebang 줄 끝의 `\r`까지
+#      인터프리터 이름으로 읽혀 "bad interpreter"가 난다.
+#
+#   2) `Dockerfile` — 빌드는 된다(파서가 `\r`을 걷어낸다). 대신 **heredoc
+#      (`RUN python - <<'PY'`) 블록의 캐시가 안 맞는다.** `\r`이 heredoc 본문
+#      안에는 남아서 캐시 키가 달라지기 때문이다. 실측: 일반 RUN 레이어는
+#      CRLF↔LF를 넘어 CACHED였지만 heredoc 4개는 전부 재실행됐다.
+#      배포가 조용히 느려지는 종류의 문제라 눈치채기 어렵다.
+#
+# `text=auto`는 git이 텍스트/바이너리를 스스로 가린다. 이 저장소에 추적 중인
+# 바이너리는 없지만(확인함), 나중에 들어와도 이 설정이 건드리지 않는다.
+
+* text=auto eol=lf
+
+# 혹시 들어올 바이너리는 명시해 둔다 — 자동 판별에 맡기지 않는다.
+*.dump  binary
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
