@@ -219,8 +219,17 @@ def use_llm(monkeypatch):
 
 
 def _prod(**overrides) -> dict:
+    """production 설정 검증용 기본값.
+
+    **SMTP를 명시적으로 비운다.** `_env_file=None`만으로는 주변 환경이 새어 들어와,
+    개발자 `.env`에 진짜 SES 자격증명이 들어 있으면(배포를 만지면 실제로 그렇게 된다)
+    "메일을 켰는데 FRONTEND_BASE_URL이 개발용" 가드에 걸려 **이 파일의 테스트들이
+    엉뚱한 이유로 실패한다.** 여기서 보려는 것은 초대 게이트·docs 노출이지 메일이
+    아니므로, 메일은 꺼진 상태로 고정한다. 메일 가드 자체는 test_mail.py가 본다.
+    """
     return dict(_env_file=None, JWT_SECRET_KEY=STRONG_SECRET, ENVIRONMENT="production",
-                CORS_ORIGINS=["https://a.com"], ALLOWED_HOSTS=["a.com"], **overrides)
+                CORS_ORIGINS=["https://a.com"], ALLOWED_HOSTS=["a.com"],
+                SMTP_HOST="", SMTP_USER="", SMTP_PASSWORD="", SMTP_FROM="", **overrides)
 
 
 def test_production_refuses_llm_with_open_signup(use_llm):
@@ -248,8 +257,7 @@ def test_production_allows_open_signup_when_llm_is_off(use_llm):
 
 def test_production_closes_the_api_docs_unless_asked():
     """OpenAPI 스키마는 전체 엔드포인트·파라미터를 그대로 알려주는 공격 지도다."""
-    prod = dict(_env_file=None, JWT_SECRET_KEY=STRONG_SECRET, ENVIRONMENT="production",
-                CORS_ORIGINS=["https://a.com"], ALLOWED_HOSTS=["a.com"])
+    prod = _prod()
     assert Settings(**prod).ENABLE_DOCS is False
     # 열려면 명시해야 한다 — 그 선택이 .env에 기록으로 남게.
     assert Settings(**prod, ENABLE_DOCS=True).ENABLE_DOCS is True
