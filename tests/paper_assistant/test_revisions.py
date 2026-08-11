@@ -4,7 +4,10 @@
 감싸여 오고, 삭제는 한 겹 더 들어간 {"value": {"delete": true}}이고, edit이 전체
 스냅샷이 아니라 부분 패치라는 것.
 """
-from paper_assistant.query.revisions import _classify, _diff_fields, _unwrap, _word_diff
+from paper_assistant.query.revisions import (
+    _classify, _diff_fields, _rematch_media_labels, _unwrap, _word_diff, attach_body_diffs,
+    _VersionExtract)
+from paper_assistant.schemas import FieldChange, PaperRevisions, RevisionEntry
 
 
 def diff(prev, cur, prev_src=None, cur_src=None):
@@ -105,3 +108,239 @@ def test_diff_fields_marks_deleted_value_as_none():
 def test_diff_fields_ignores_untracked_noise():
     """_bibtex·venue 같은 시스템 생성 필드는 저자 수정이 아니라 노이즈다."""
     assert diff({"_bibtex": "@x{}"}, {"_bibtex": "@y{}"}) == []
+
+
+# ---------------------------------------------------------- attach_body_diffs
+#
+# 실제 다운로드(get_bytes)+PyMuPDF는 여기서 테스트하지 않는다 — 이 파일의 다른
+# 테스트처럼 순수 함수 컨벤션을 지키기 위해 fetch_version을 URL→_VersionExtract
+# 가짜 함수로 주입해서, 오케스트레이션(중복 제거·skip 조건·삽입 위치·행 매칭)만
+# 검증한다.
+
+def _pdf_change(before_url="u://before.pdf", after_url="u://after.pdf"):
+    return FieldChange(field="pdf", label="본문 PDF", kind="file", after="교체됨",
+                       before_url=before_url, after_url=after_url)
+
+
+def _revisions_with(*changes_lists):
+    entries = [
+        RevisionEntry(revision_id=f"r{i}", kind="revision", kind_label="수정본",
+                      timestamp=i, date="2026-01-01 00:00", changes=list(changes))
+        for i, changes in enumerate(changes_lists)
+    ]
+    return PaperRevisions(paper_id=1, openreview_id="abc", supported=True,
+                          revisions=entries)
+
+
+def _version(text, images=None):
+    return _VersionExtract(text=text, images=images or {})
+
+
+def test_attach_body_diffs_inserts_body_change_right_after_pdf_change():
+    revisions = _revisions_with([_pdf_change()])
+    versions = {"u://before.pdf": _version("the quick brown fox"),
+               "u://after.pdf": _version("the quick red fox")}
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    changes = revisions.revisions[0].changes
+    assert [c.field for c in changes] == ["pdf", "body"]
+    body = changes[1]
+    assert body.kind == "text"
+    assert body.similarity is not None
+    assert ("delete", "brown") in [(s.op, s.text) for s in body.segments]
+    assert ("insert", "red") in [(s.op, s.text) for s in body.segments]
+
+
+def test_attach_body_diffs_does_not_store_full_text():
+    """저장 공간을 아끼려고 before/after는 채우지 않는다 — segments만으로 재구성."""
+    revisions = _revisions_with([_pdf_change()])
+    versions = {"u://before.pdf": _version("a b c"), "u://after.pdf": _version("a x c")}
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    body = revisions.revisions[0].changes[1]
+    assert body.before is None and body.after is None
+
+
+def test_attach_body_diffs_inserts_immediately_after_pdf_not_at_end():
+    """리비전에 다른 필드 변경도 있으면, body는 끝이 아니라 pdf 바로 다음에 온다."""
+    title_change = FieldChange(field="title", label="제목", kind="text",
+                               before="A", after="B", similarity=0.5, segments=[])
+    revisions = _revisions_with([title_change, _pdf_change()])
+    versions = {"u://before.pdf": _version("a b"), "u://after.pdf": _version("a c")}
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    assert [c.field for c in revisions.revisions[0].changes] == ["title", "pdf", "body"]
+
+
+def test_attach_body_diffs_dedupes_downloads_across_revisions():
+    """리비전1의 after가 리비전2의 before로 재등장 — 같은 URL은 한 번만 가져온다."""
+    revisions = _revisions_with(
+        [_pdf_change("u://a", "u://b")],
+        [_pdf_change("u://b", "u://c")],
+    )
+    calls: list[str] = []
+    versions = {"u://a": _version("one two three"), "u://b": _version("one two four"),
+               "u://c": _version("one five four")}
+
+    def fake_fetch(url):
+        calls.append(url)
+        return versions[url]
+
+    attach_body_diffs(revisions, fetch_version=fake_fetch)
+
+    assert calls.count("u://b") == 1
+    assert sorted(set(calls)) == ["u://a", "u://b", "u://c"]
+
+
+def test_attach_body_diffs_skips_when_url_missing():
+    """pdf가 추가만 됐거나 삭제만 된 경우 (한쪽 링크가 없음) — 본문 diff를 만들지 않는다."""
+    revisions = _revisions_with([_pdf_change(before_url=None)])
+    attach_body_diffs(revisions, fetch_version=lambda url: _version("text"))
+    assert [c.field for c in revisions.revisions[0].changes] == ["pdf"]
+
+
+def test_attach_body_diffs_skips_when_fetch_fails():
+    """다운로드 실패·깨진 텍스트는 fetch_version이 None으로 알려온다 — 조용히 건너뛴다."""
+    revisions = _revisions_with([_pdf_change()])
+    attach_body_diffs(revisions, fetch_version=lambda url: None)
+    assert [c.field for c in revisions.revisions[0].changes] == ["pdf"]
+
+
+def test_attach_body_diffs_ignores_non_pdf_file_changes():
+    """supplementary_material도 kind=='file'이지만 PDF가 아닐 수 있어 대상에서 뺀다."""
+    supplementary = FieldChange(field="supplementary_material", label="보충 자료",
+                                kind="file", after="교체됨",
+                                before_url="u://s1", after_url="u://s2")
+    revisions = _revisions_with([supplementary])
+    attach_body_diffs(revisions, fetch_version=lambda url: _version("text"))
+    assert [c.field for c in revisions.revisions[0].changes] == ["supplementary_material"]
+
+
+# ------------------------------------------------------- 그림/표 (attach_body_diffs)
+
+def test_attach_body_diffs_adds_figure_as_image_kind_no_highlight():
+    """그림은 하이라이트 없이 전/후 이미지만 나란히 붙인다."""
+    revisions = _revisions_with([_pdf_change()])
+    versions = {
+        "u://before.pdf": _version("t1", images={"Figure 1": b"OLDPNG"}),
+        "u://after.pdf": _version("t2", images={"Figure 1": b"NEWPNG"}),
+    }
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    changes = revisions.revisions[0].changes
+    assert [c.field for c in changes] == ["pdf", "body", "figure"]
+    fig = changes[2]
+    assert fig.kind == "image" and fig.label == "Figure 1"
+    assert fig.before_image.startswith("data:image/png;base64,")
+    assert fig.after_image.startswith("data:image/png;base64,")
+    assert fig.segments == []  # 그림엔 diff segment가 없다
+
+
+def test_attach_body_diffs_figure_only_on_one_side_is_still_shown():
+    """새로 추가되거나 삭제된 그림도 (없는 쪽은 None으로) 보여준다."""
+    revisions = _revisions_with([_pdf_change()])
+    versions = {
+        "u://before.pdf": _version("t1", images={}),
+        "u://after.pdf": _version("t2", images={"Figure 3": b"NEWPNG"}),
+    }
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    fig = revisions.revisions[0].changes[2]
+    assert fig.label == "Figure 3"
+    assert fig.before_image is None
+    assert fig.after_image.startswith("data:image/png;base64,")
+
+
+def test_attach_body_diffs_table_is_treated_as_image_like_a_figure():
+    """표도 그림과 똑같이 kind='image'로, field만 'table'로 구분해서 붙인다.
+
+    find_tables()로 셀 구조까지 diff하는 건 병합된 셀 때문에 원본과 많이
+    달라져서 포기했다 — 표도 영역을 그대로 이미지로 잘라 비교한다.
+    """
+    revisions = _revisions_with([_pdf_change()])
+    versions = {
+        "u://before.pdf": _version("t1", images={"Table 1": b"OLDPNG"}),
+        "u://after.pdf": _version("t2", images={"Table 1": b"NEWPNG"}),
+    }
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    changes = revisions.revisions[0].changes
+    assert [c.field for c in changes] == ["pdf", "body", "table"]
+    table = changes[2]
+    assert table.kind == "image" and table.label == "Table 1"
+    assert table.before_image.startswith("data:image/png;base64,")
+    assert table.after_image.startswith("data:image/png;base64,")
+
+
+def test_attach_body_diffs_figures_and_tables_both_appear_sorted_by_number():
+    """그림·표가 섞여 있어도 둘 다 붙는다 — 정렬은 종류 구분 없이 번호로만 한다
+    (field로 그림/표를 구분하는 건 위치가 아니라 프론트가 본문 안 자리표시자로
+    한다)."""
+    revisions = _revisions_with([_pdf_change()])
+    versions = {
+        "u://before.pdf": _version("t1", images={"Table 2": b"T2", "Figure 1": b"F1"}),
+        "u://after.pdf": _version("t2", images={"Table 2": b"T2b", "Figure 1": b"F1b"}),
+    }
+
+    attach_body_diffs(revisions, fetch_version=versions.get)
+
+    changes = revisions.revisions[0].changes
+    labels = [(c.field, c.label) for c in changes if c.kind == "image"]
+    assert labels == [("figure", "Figure 1"), ("table", "Table 2")]
+
+
+# ------------------------------------------------ 표 번호 재배치 (합성 케이스)
+#
+# 실제 논문으로 재현을 시도했으나(26079 등 여러 편) 표 번호가 리비전 사이에
+# 재배치되는 실측 사례를 못 찾았다 — Figure 5·6·7 재배치처럼 흔하지 않다.
+# _rematch_media_labels는 prefix만 다를 뿐 Figure와 완전히 같은 함수를
+# 공유하므로(paper_assistant/query/revisions.py), Figure 5·6·7 실측으로 이미
+# 검증된 로직 그대로다 — 합성 데이터로 표에도 동작을 고정해 둔다.
+
+def test_rematch_media_labels_finds_renumbered_table_by_caption():
+    """표 5가 삭제되면서 표 6이 표 5로 당겨진 경우 — 캡션으로 진짜 상대를 찾는다."""
+    before_captions = {
+        "Table 5": "Ablation study on the effect of the proposed regularization term",
+        "Table 6": "Comparison with baseline methods on the held-out test set",
+    }
+    after_captions = {
+        "Table 5": "Comparison with baseline methods on the held-out test set",
+    }
+    before_images = {"Table 5": b"old-ablation", "Table 6": b"old-comparison"}
+    after_images = {"Table 5": b"new-comparison"}
+
+    matches = _rematch_media_labels(
+        "Table", before_images, after_images, {}, {}, before_captions, after_captions)
+
+    assert matches == {"Table 6": "Table 5"}
+    assert "Table 5" not in matches  # 진짜 삭제된 표는 매칭되지 않고 남는다
+
+
+def test_attach_body_diffs_reflects_renumbered_table_with_both_images():
+    """재배치된 표는 field='table' 항목 하나로 합쳐지고 양쪽 이미지가 다 있다 —
+    번호가 재사용된 삭제 표는 별도 항목으로 before만 채워진다."""
+    before = _VersionExtract(
+        text="t1", images={"Table 5": b"old-ablation", "Table 6": b"old-comparison"},
+        captions={
+            "Table 5": "Ablation study on the effect of the proposed regularization term",
+            "Table 6": "Comparison with baseline methods on the held-out test set",
+        })
+    after = _VersionExtract(
+        text="t2", images={"Table 5": b"new-comparison"},
+        captions={"Table 5": "Comparison with baseline methods on the held-out test set"})
+    revisions = _revisions_with([_pdf_change()])
+
+    attach_body_diffs(revisions, fetch_version={"u://before.pdf": before, "u://after.pdf": after}.get)
+
+    tables = {c.label: c for c in revisions.revisions[0].changes if c.field == "table"}
+    assert tables["Table 6"].after_label == "Table 5"
+    assert tables["Table 6"].before_image is not None
+    assert tables["Table 6"].after_image is not None
+    assert tables["Table 5"].before_image is not None
+    assert tables["Table 5"].after_image is None  # 진짜 삭제됨, 재배치와 안 섞인다

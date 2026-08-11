@@ -185,7 +185,7 @@ class PaperListResponse(BaseModel):
 
 class DiffSegment(BaseModel):
     """텍스트 변경의 단어 단위 조각. 프론트가 색만 입혀 그리면 된다."""
-    op: str = Field(description="equal | insert | delete")
+    op: str = Field(description="equal | insert | delete | moved")
     text: str
 
 
@@ -193,11 +193,13 @@ class FieldChange(BaseModel):
     """리비전 1건에서 바뀐 필드 하나."""
     field: str = Field(description="OpenReview content 필드명")
     label: str = Field(description="화면 표시용 한국어 라벨")
-    kind: str = Field(description="text(단어 diff 있음) | file(교체 여부만) | value")
+    kind: str = Field(
+        description="text(단어 diff) | file(교체 여부만) | value | image(그림·표 전후 비교)")
     before: str | None = None
     after: str | None = None
     similarity: float | None = Field(
-        default=None, description="text일 때 단어 단위 유사도(1.0=동일)")
+        default=None,
+        description="text일 때 단어 단위 유사도(1.0=동일)")
     segments: list[DiffSegment] = Field(
         default_factory=list, description="text일 때만. 길면 잘려 있을 수 있다")
 
@@ -205,6 +207,27 @@ class FieldChange(BaseModel):
     # content에 실린 /pdf/<해시>.pdf 경로는 교체되면 404라 쓸 수 없다(실측).
     before_url: str | None = None
     after_url: str | None = None
+
+    # kind == "image"일 때만 — 그림·표 둘 다 하이라이트 없이 전/후를 나란히
+    # 보여준다. 표도 텍스트로 재구성하지 않고 이미지로 비교한다 — find_tables()가
+    # 병합된 셀을 못 풀어내 원본과 많이 달라지는 것보다, 영역을 그대로 잘라
+    # 보여주는 쪽이 원본에 더 가깝다고 판단했다(paper_assistant/pdf/extract.py의
+    # extract_media_images). 픽셀 단위 비교는 안 한다(오탐이 잦고 범위 밖).
+    before_image: str | None = Field(
+        default=None, description="data:image/png;base64,... 한쪽에만 있으면 추가/삭제된 것")
+    after_image: str | None = None
+
+    # kind == "image"이고 저자가 번호를 재배치했을 때만(예: v2의 Figure 6가
+    # v3에서 Figure 5가 됨). label은 항상 "수정 전(before) 번호" 기준이고,
+    # after_label은 "수정 후(after) 문서에서 실제로 불리는 번호"다. 두 값이
+    # 다르면 프론트는 v2 본문에 나오는 "(그림 6)"은 label로, v3 본문에 나오는
+    # "(그림 5)"는 after_label로 각각 찾아야 한다 — 하나의 평평한 라벨→이미지
+    # 표로 합치면, 서로 다른 두 그림이 번호를 주고받아 우연히 같은 번호를
+    # 쓰게 될 때(실측: v2 Figure 7이 v3 Figure 6가 되면서, v2 Figure 6→v3
+    # Figure 5인 별개의 그림과 "Figure 6"라는 번호가 겹침) 한쪽이 다른 쪽을
+    # 덮어써 버린다.
+    after_label: str | None = Field(
+        default=None, description="번호가 재배치됐을 때 수정 후 문서에서의 라벨. 같으면 None")
 
 
 class RevisionEntry(BaseModel):
@@ -239,6 +262,9 @@ class PaperRevisions(BaseModel):
     message: str | None = Field(
         default=None, description="불가 사유 또는 '이력 없음' 안내. 그대로 노출 가능")
     revisions: list[RevisionEntry] = Field(default_factory=list)
+    cached_at: str | None = Field(
+        default=None,
+        description="캐시에서 나온 응답이면 최초 생성 시각(ISO). 방금 만든 것이면 None")
 
 
 class JourneyStop(BaseModel):

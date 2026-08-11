@@ -34,6 +34,8 @@ CORPUS_TABLES = {
     # 심사 서사 캐시. alembic 0009가 만들지만 소유자는 AI 파트이고 SQLAlchemy 모델이
     # 없다 — 백엔드는 이 테이블을 직접 읽지 않고 paper_assistant를 거친다.
     "paper_stories",
+    # 리비전 본문(PDF) diff 캐시. alembic 0013, paper_stories와 같은 사정.
+    "paper_body_diffs",
 }
 
 

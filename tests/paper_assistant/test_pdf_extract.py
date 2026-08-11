@@ -235,6 +235,28 @@ def _scanned_pdf(pages: int = 3) -> bytes:
     return data
 
 
+# ------------------------------------------------------------- 본문 전체 추출
+#
+# 리비전 본문 diff 전용 경로다. _text_pdf를 그대로 재사용한다 — 제목/초록 추출과
+# 달리 여기서는 "여러 페이지의 텍스트를 다 모았는가/페이지 상한을 지키는가"가
+# 검증 대상이라 실제 멀티페이지 PDF가 필요하다.
+
+def test_extract_full_text_joins_all_pages():
+    from paper_assistant.pdf.extract import extract_full_text
+
+    text = extract_full_text(_text_pdf(pages=3), max_pages=10)
+    assert _TITLE in text
+    assert text.count("body text") == 2   # 2·3페이지 각각의 본문
+
+
+def test_extract_full_text_returns_none_over_page_cap():
+    """절삭해서 비교하면 appendix 너머의 실제 수정이 유사도를 왜곡할 수 있어
+    잘라내는 대신 아예 포기한다."""
+    from paper_assistant.pdf.extract import extract_full_text
+
+    assert extract_full_text(_text_pdf(pages=5), max_pages=3) is None
+
+
 class _StubLLM:
     """호출 기록을 남기는 가짜 LLM (API 비용 0)."""
 
