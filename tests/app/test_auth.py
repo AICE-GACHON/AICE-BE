@@ -1,4 +1,5 @@
 """회원가입·로그인·토큰 검증."""
+from app.models.user import OPENREVIEW_ID_PENDING_PREFIX, User
 from tests.app.conftest import _unique_openreview_id
 
 
@@ -43,31 +44,58 @@ def test_signup_rejects_duplicate_openreview_id(client):
     assert res.status_code == 409
 
 
-def test_signup_without_openreview_id_gets_placeholder(client):
+def test_signup_without_openreview_id_gets_placeholder(client, db):
     """베타에서는 openreview_id를 받지 않는다 — 서버가 자리표시자를 만든다.
 
     예전에는 422로 거절했다(필수였다). 지금 이 값을 읽는 기능이 없어서 가입
     문턱만 높이고 있었다. 컬럼은 여전히 unique·not null이므로 **비워둘 수는
     없고**, 계정마다 고유한 값이어야 한다 — 같은 값을 넣으면 두 번째 가입자가
     IntegrityError로 거절된다.
+
+    **자리표시자는 DB에만 있고 응답에는 나가지 않는다.** 그래서 이 테스트는
+    응답이 아니라 DB를 본다 — 응답만 보면 "안 만들어졌다"와 "만들었지만 숨겼다"를
+    구분할 수 없다.
     """
     res = client.post("/api/auth/signup", json={
         "email": "no-id@example.com", "password": "password123",
         "nickname": "아이디없음"})
     assert res.status_code == 201
-    assert res.json()["data"]["openreview_id"].startswith("pending:")
+    assert res.json()["data"]["openreview_id"] is None
+
+    user = db.query(User).filter(User.email == "no-id@example.com").one()
+    assert user.openreview_id.startswith(OPENREVIEW_ID_PENDING_PREFIX)
 
 
-def test_signup_placeholders_are_unique_per_account(client):
-    """자리표시자가 계정마다 달라야 한다. 같으면 두 번째 가입이 통째로 막힌다."""
-    ids = []
+def test_signup_placeholders_are_unique_per_account(client, db):
+    """자리표시자가 계정마다 달라야 한다. 같으면 두 번째 가입이 통째로 막힌다.
+
+    응답은 둘 다 null이라 여기서는 아무것도 알 수 없다 — DB 값을 직접 본다.
+    """
     for i in range(2):
         res = client.post("/api/auth/signup", json={
             "email": f"placeholder{i}@example.com", "password": "password123",
             "nickname": f"사용자{i}"})
         assert res.status_code == 201, res.text
-        ids.append(res.json()["data"]["openreview_id"])
+
+    ids = [
+        db.query(User).filter(User.email == f"placeholder{i}@example.com").one().openreview_id
+        for i in range(2)
+    ]
     assert ids[0] != ids[1]
+
+
+def test_placeholder_is_hidden_but_real_id_is_not(client, db):
+    """숨기는 것은 자리표시자뿐이다. 진짜 ID는 그대로 나가야 한다.
+
+    접두사 검사가 너무 넓으면(예: 값이 있으면 무조건 가린다) 정상적으로 ID를
+    넣은 사람의 화면까지 빈칸이 된다 — 통과만 하고 아무것도 못 잡는 걸 막는다.
+    """
+    real_id = _unique_openreview_id()
+    res = client.post("/api/auth/signup", json={
+        "email": "real-id@example.com", "password": "password123",
+        "nickname": "진짜아이디", "openreview_id": real_id})
+    assert res.status_code == 201
+    assert res.json()["data"]["openreview_id"] == real_id
 
 
 def test_signup_rejects_short_password(client):

@@ -17,7 +17,7 @@ from app.core.security import (
 )
 from app.database import get_db
 from app.models.onboarding import OnboardingProfile
-from app.models.user import User
+from app.models.user import OPENREVIEW_ID_PENDING_PREFIX, User
 from app.schemas.auth import (
     GoogleLoginRequest, LoginRequest, PasswordForgotRequest, PasswordResetRequest, RefreshRequest,
     SignupRequest, TokenResponse, UserResponse,
@@ -50,9 +50,12 @@ def _openreview_id_or_placeholder(given: str | None) -> str:
     `pending:` 접두사는 의도적이다. 진짜 OpenReview ID는 `~Name1` 꼴이라 섞이지
     않고, 나중에 "아직 안 채운 사람"을 한 번에 찾아낼 수 있다. 사용자는
     PATCH /api/user/me로 진짜 ID를 넣을 수 있다.
+
+    **이 값은 응답에 나가지 않는다** — UserResponse가 같은 접두사를 보고 null로
+    바꾼다(app/schemas/auth.py). 접두사 문자열은 models/user.py 한 곳에만 있다.
     """
     given = (given or "").strip()
-    return given or f"pending:{uuid.uuid4()}"
+    return given or f"{OPENREVIEW_ID_PENDING_PREFIX}{uuid.uuid4()}"
 
 
 def _require_invite(code: str | None) -> None:

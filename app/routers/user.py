@@ -9,7 +9,7 @@ from app.models.onboarding import OnboardingProfile
 from app.models.user import User
 from app.schemas.auth import AccountDeleteRequest, UserResponse, UserUpdateRequest
 from app.schemas.common import ApiResponse, Message
-from app.schemas.onboarding import OnboardingResponse
+from app.schemas.onboarding import OnboardingResponse, OnboardingUpdate
 
 # 도메인: user (내 정보 조회/수정/탈퇴)
 router = APIRouter(prefix="/api/user", tags=["user"])
@@ -108,4 +108,49 @@ def get_my_onboarding(
     )
     if profile is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="온보딩 답변이 없습니다.")
+    return ApiResponse[OnboardingResponse](data=OnboardingResponse.model_validate(profile))
+
+
+@router.patch("/me/onboarding", response_model=ApiResponse[OnboardingResponse])
+def update_my_onboarding(
+    payload: OnboardingUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """온보딩 답변을 고친다. 보낸 필드만 갱신하고, 답변이 없으면 새로 만든다.
+
+    **upsert인 이유**: 온보딩을 건너뛰고 가입했거나 구글로 바로 가입한 계정은
+    행 자체가 없다(get_my_onboarding이 404를 주는 상태). 그 사람들에게 404를
+    돌려주면 "수정하려면 먼저 만드세요"가 되는데, 만들 화면이 따로 없다 —
+    온보딩은 가입 전에만 지나가는 흐름이라 다시 갈 수 없다. 그래서 첫 PATCH가
+    행을 만든다.
+
+    POST /api/onboarding(익명 생성)과 달리 **user_id를 처음부터 채워서 만든다.**
+    익명 행은 가입할 때 연결되지만, 이쪽은 이미 로그인한 사람이라 연결할 대상이
+    분명하다. user_id는 unique라 한 사람에게 행이 둘 생길 일은 없다.
+    """
+    # exclude_unset이 핵심이다. 이게 없으면 안 보낸 필드가 기본값(None/[])으로
+    # 들어와, 목표 학회 하나 고치려던 PATCH가 나머지 답변을 전부 지운다.
+    changes = payload.model_dump(exclude_unset=True)
+
+    # 리스트 컬럼은 JSONB지만 nullable=False다(models/onboarding.py). 명시적으로
+    # null을 보내오면 DB에서 터져 500이 되므로, 그건 "안 보낸 것"과 같이 취급한다.
+    # 비우고 싶으면 []를 보내면 된다. 반면 스칼라(venue 등)는 nullable이라
+    # null이 "답을 지웠다"는 뜻으로 유효하다 — 그대로 통과시킨다.
+    for name in ("purposes", "fields", "result_order"):
+        if changes.get(name, ...) is None:
+            changes.pop(name)
+
+    profile = (
+        db.query(OnboardingProfile).filter(OnboardingProfile.user_id == current_user.user_id).first()
+    )
+    if profile is None:
+        profile = OnboardingProfile(user_id=current_user.user_id)
+        db.add(profile)
+
+    for name, value in changes.items():
+        setattr(profile, name, value)
+
+    db.commit()
+    db.refresh(profile)
     return ApiResponse[OnboardingResponse](data=OnboardingResponse.model_validate(profile))
