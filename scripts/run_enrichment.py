@@ -29,12 +29,12 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(message)s")
 
     if not args.skip_harvest:
-        log.info("[1/4] arXiv OAI-PMH 하베스트")
+        log.info("[1/5] arXiv OAI-PMH 하베스트")
         arxiv_client.harvest()
     else:
-        log.info("[1/4] 하베스트 생략 — 체크포인트: %s", arxiv_client.cache_status())
+        log.info("[1/5] 하베스트 생략 — 체크포인트: %s", arxiv_client.cache_status())
 
-    log.info("[2/4] arXiv id 매칭")
+    log.info("[2/5] arXiv id 매칭")
     arxiv_matcher.run_matching()
 
     log.info("[3/5] Semantic Scholar 보강")
