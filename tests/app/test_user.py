@@ -193,3 +193,123 @@ def test_google_only_account_deletes_without_a_password(client, google_only):
     res = client.delete("/api/user/me", headers=google_only["headers"])
     assert res.status_code == 200, res.text
     assert client.get("/api/user/me", headers=google_only["headers"]).status_code == 401
+
+
+# ------------------------------------------------------------- has_password
+#
+# 프론트가 "비밀번호 변경 UI를 띄울지", "탈퇴에 비밀번호를 물을지"를 판단하는
+# 유일한 근거다. google_linked로는 판단할 수 없다는 것이 아래 세 번째 테스트다.
+
+def test_password_account_reports_has_password(client, auth):
+    body = client.get("/api/user/me", headers=auth["headers"]).json()["data"]
+    assert body["has_password"] is True
+    assert "password_hash" not in body  # 있고 없고만 알려준다
+
+
+def test_google_only_account_reports_no_password(client, google_only):
+    body = client.get("/api/user/me", headers=google_only["headers"]).json()["data"]
+    assert body["has_password"] is False
+    assert body["google_linked"] is True
+
+
+def test_google_linked_email_account_still_has_a_password(client, auth, monkeypatch):
+    """이메일로 가입한 계정에 구글을 연동해도 비밀번호는 남아 있다.
+
+    **이 경우가 has_password를 만든 이유다.** 여기서 google_linked와 has_password가
+    둘 다 True로 갈린다 — google_linked만 보고 "구글이니까 비밀번호 없음"으로
+    분기하면, 비밀번호를 바꿀 수 있는 사람에게 변경 UI가 사라지고 탈퇴 확인에도
+    입력칸이 안 뜬다(그런데 서버는 비밀번호를 요구하므로 400이다).
+    """
+    claims = {"sub": f"google-sub-{uuid.uuid4().hex[:12]}", "email": auth["email"],
+              "email_verified": True, "name": "연동"}
+    monkeypatch.setattr("app.routers.auth.verify_google_id_token", lambda token: claims)
+    assert client.post("/api/auth/google", json={"id_token": "fake"}).status_code == 200
+
+    body = client.get("/api/user/me", headers=auth["headers"]).json()["data"]
+    assert body["google_linked"] is True
+    assert body["has_password"] is True
+
+    # 실제로도 비밀번호가 살아 있어야 한다 — 플래그만 맞고 동작이 다르면 소용없다
+    assert client.post("/api/auth/login", json={
+        "email": auth["email"], "password": auth["password"]}).status_code == 200
+
+
+# --------------------------------------------- 온보딩 답변 수정 (PATCH /me/onboarding)
+
+def _patch_onboarding(client, auth, **body):
+    return client.patch("/api/user/me/onboarding", json=body, headers=auth["headers"])
+
+
+def test_onboarding_patch_creates_when_missing(client, auth):
+    """행이 없으면 만든다 (upsert).
+
+    온보딩을 건너뛰고 가입한 계정은 행이 아예 없다. 404를 돌려주면 "먼저
+    만드세요"가 되는데, 온보딩은 가입 전에만 지나가는 흐름이라 다시 갈 수 없다.
+    """
+    assert client.get("/api/user/me/onboarding", headers=auth["headers"]).status_code == 404
+
+    res = _patch_onboarding(client, auth, stage="drafting", venue="ICLR")
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["stage"] == "drafting"
+
+    after = client.get("/api/user/me/onboarding", headers=auth["headers"])
+    assert after.status_code == 200
+    assert after.json()["data"]["venue"] == "ICLR"
+
+
+def test_onboarding_patch_updates_only_the_fields_sent(client, auth):
+    """**안 보낸 필드는 그대로 남는다.**
+
+    exclude_unset이 빠지면 여기서 걸린다 — venue 하나 고치려던 요청이
+    purposes/fields를 기본값 []로 덮어써 답변이 통째로 사라진다.
+    """
+    _patch_onboarding(client, auth, user_type="student", purposes=["publish"],
+                      fields=["ML", "NLP"], venue="ICLR")
+
+    res = _patch_onboarding(client, auth, venue="NeurIPS")
+    assert res.status_code == 200, res.text
+    data = res.json()["data"]
+    assert data["venue"] == "NeurIPS"
+    assert data["purposes"] == ["publish"]
+    assert data["fields"] == ["ML", "NLP"]
+    assert data["user_type"] == "student"
+
+
+def test_onboarding_patch_can_clear_a_list_with_an_empty_array(client, auth):
+    """[]는 "안 보냄"과 달리 의도적으로 비운 것이다."""
+    _patch_onboarding(client, auth, fields=["ML"])
+    res = _patch_onboarding(client, auth, fields=[])
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["fields"] == []
+
+
+def test_onboarding_patch_null_list_is_not_a_500(client, auth):
+    """리스트 컬럼은 nullable=False다. 명시적 null이 DB까지 가면 500이 난다.
+
+    "안 보낸 것"과 같이 취급해 무시한다 — 비우려면 []를 보내면 된다.
+    """
+    _patch_onboarding(client, auth, purposes=["publish"])
+    res = _patch_onboarding(client, auth, purposes=None)
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["purposes"] == ["publish"]
+
+
+def test_onboarding_patch_keeps_answers_separate_between_users(client, auth, other_user):
+    """남의 답변을 고치거나 읽으면 안 된다."""
+    _patch_onboarding(client, auth, venue="ICLR")
+    _patch_onboarding(client, other_user, venue="NeurIPS")
+
+    mine = client.get("/api/user/me/onboarding", headers=auth["headers"]).json()["data"]
+    theirs = client.get("/api/user/me/onboarding", headers=other_user["headers"]).json()["data"]
+    assert mine["venue"] == "ICLR"
+    assert theirs["venue"] == "NeurIPS"
+    assert mine["onboarding_id"] != theirs["onboarding_id"]
+
+
+def test_onboarding_patch_rejects_unauthenticated(client):
+    assert client.patch("/api/user/me/onboarding", json={"venue": "ICLR"}).status_code == 401
+
+
+def test_onboarding_patch_enforces_the_same_limits_as_create(client, auth):
+    """수정이 생성보다 느슨하면 그쪽이 우회로가 된다 (venue는 String(100))."""
+    assert _patch_onboarding(client, auth, venue="X" * 101).status_code == 422

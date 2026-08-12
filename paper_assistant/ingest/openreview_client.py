@@ -106,6 +106,18 @@ class OpenReviewClient:
                                timeout=60, label=path, params=params)
         return r.json()
 
+    def get_bytes(self, url: str) -> bytes:
+        """완성된 URL을 그대로 GET해 바이트를 반환한다 (JSON이 아닌 첨부파일용).
+
+        _get과 달리 self.base를 앞에 붙이지 않는다 — url은 이미 완성된 주소
+        (revisions.py의 before_url/after_url 등)를 그대로 받는다. 404 등은
+        request_with_retry가 재시도 없이 즉시 raise_for_status로 예외를 던지므로,
+        호출부에서 URL 단위로 실패를 감싸야 한다.
+        """
+        r = request_with_retry(self.session, "GET", url, decide=self._decide,
+                               retries=MAX_RETRIES, timeout=60, label="attachment")
+        return r.content
+
     def count_notes(self, **query) -> int:
         """조건에 맞는 note 총 개수. (limit>=3 + offset이 있어야 count가 온다)"""
         data = self._get("/notes", **query, limit=3, offset=0)

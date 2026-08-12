@@ -2,8 +2,9 @@ import uuid
 
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field, model_validator
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator, model_validator
 
+from app.models.user import OPENREVIEW_ID_PENDING_PREFIX
 from app.schemas.common import ORMBase, TimestampMixin
 
 
@@ -126,8 +127,23 @@ class UserResponse(ORMBase, TimestampMixin):
     user_id: uuid.UUID
     email: EmailStr
     nickname: str
-    openreview_id: str
+    # 아직 안 채운 계정은 **null이다.** DB에는 자리표시자가 들어 있지만
+    # (models/user.py OPENREVIEW_ID_PENDING_PREFIX) 그건 unique·not null 제약을
+    # 만족시키려는 사정일 뿐이라 밖으로 내보내지 않는다. 그대로 내보내면 화면에
+    # `pending:9f3c8a1e-…`가 사용자 ID인 것처럼 찍힌다.
+    openreview_id: str | None = Field(
+        default=None, description="아직 연결하지 않았으면 null")
     google_linked: bool = Field(description="구글 계정이 연동돼 있는지")
+    has_password: bool = Field(
+        description="비밀번호로 로그인할 수 있는 계정인지. "
+                    "false면 구글 전용이라 비밀번호 변경이 400이고, 탈퇴에 비밀번호가 필요 없다")
+
+    @field_validator("openreview_id", mode="after")
+    @classmethod
+    def _hide_placeholder(cls, value: str | None) -> str | None:
+        if value is not None and value.startswith(OPENREVIEW_ID_PENDING_PREFIX):
+            return None
+        return value
 
 
 class TokenResponse(BaseModel):

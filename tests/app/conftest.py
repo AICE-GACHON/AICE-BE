@@ -14,6 +14,7 @@ import uuid
 import pytest
 from sqlalchemy import inspect, text
 
+from app.core import mail
 from app.core.rate_limit import limiter
 from app.database import Base, SessionLocal, engine, get_db
 from app.main import app
@@ -71,6 +72,29 @@ def _disable_rate_limit():
     limiter.enabled = False
     yield
     limiter.enabled = True
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_smtp(monkeypatch):
+    """테스트는 **주변 환경의 SMTP 설정을 절대 쓰지 않는다.**
+
+    `.env`에 진짜 SES 자격증명을 넣는 순간(배포를 만지면 실제로 그렇게 된다)
+    테스트 전체가 두 가지로 망가진다:
+
+    1. **진짜 SES로 요청이 나간다.** 재설정 흐름을 다루는 테스트마다
+       `user-xxxx@example.com` 앞으로 발송을 시도한다. 미검증 주소라 SES가
+       거절하지만 **요청은 실제로 나가고 일일 한도를 깎는다.** 수신자가 하필
+       검증된 주소라면 테스트가 남에게 메일을 보낸다.
+    2. **테스트가 실패한다.** `test_password_reset.py`의 `reset_token` 픽스처는
+       "미설정이면 링크를 로그로 남긴다"는 개발용 경로에 의존해 토큰을 얻는데
+       (app/core/mail.py), 설정이 채워져 있으면 그 경로를 안 타서 토큰을 못 얻는다.
+
+    그래서 기본값을 **미설정으로 고정**한다. 설정된 상태가 필요한 테스트는
+    직접 채워 쓴다(tests/app/test_mail.py의 `smtp_configured`). autouse가 먼저
+    돌고 명시 픽스처가 뒤에 덮으므로 순서 문제는 없다.
+    """
+    for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"):
+        monkeypatch.setattr(mail.settings, name, "")
 
 
 @pytest.fixture

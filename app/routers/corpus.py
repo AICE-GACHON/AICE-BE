@@ -21,8 +21,8 @@ from app.schemas.corpus import (
     PaperListResponse, PaperResponse, ReviewResponse, RevisionsResponse,
     StoryResponse)
 from paper_assistant import (
-    get_paper_detail, get_paper_reviews, get_paper_revisions, get_paper_story,
-    list_papers as _list_papers)
+    get_paper_detail, get_paper_reviews, get_paper_revisions,
+    get_paper_revisions_with_body, get_paper_story, list_papers as _list_papers)
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
 
@@ -43,6 +43,13 @@ _NOT_FOUND = HTTPException(
 # ⚠️ 저장소가 메모리라 워커를 늘리면 워커별로 따로 센다 (app/core/rate_limit.py).
 # 배포에서 워커를 늘릴 거면 Redis 저장소로 바꿔야 이 상한이 실제로 상한이 된다.
 _EXTERNAL_CALL_LIMIT = "30/hour"
+
+# `/revisions/body-diff`는 그 위 두 엔드포인트보다 훨씬 무겁다 — 캐시 미스 1건이
+# pdf가 교체된 지점마다 실제 PDF 다운로드(중복 제거되지만 각각 수 MB) + PyMuPDF
+# 파싱 + 전체 본문 diff를 수행한다. 분석 1회가 논문 5편을 내놓는 기준으로 "분석
+# 결과를 전부 열람"은 여전히 여유 있게 커버하면서, paper_id 스캔형 공격은
+# `/revisions`(30회)의 3분의 1인 10회에서 끊는다.
+_BODY_DIFF_CALL_LIMIT = "10/hour"
 
 
 @router.get("", response_model=ApiResponse[PaperListResponse])
@@ -104,6 +111,52 @@ def get_revisions(request: Request, paper_id: int):
     그 문구를 노출하세요.
     """
     revisions = get_paper_revisions(paper_id)
+    if revisions is None:
+        raise _NOT_FOUND
+    return ApiResponse[RevisionsResponse](data=revisions)
+
+
+@router.get("/{paper_id}/revisions/body-diff", response_model=ApiResponse[RevisionsResponse])
+@limiter.limit(_BODY_DIFF_CALL_LIMIT)
+def get_revisions_body_diff(
+    request: Request,
+    paper_id: int,
+    refresh: bool = Query(
+        default=False,
+        description="캐시를 무시하고 다시 만듭니다 (훨씬 느리고, **로그인이 필요합니다**)"),
+    user: User | None = Depends(get_current_user_optional),
+):
+    """`/revisions`에 pdf가 교체된 지점마다 본문 전체 diff를 얹은 버전.
+
+    ⚠️ **`/revisions`보다 훨씬 느리고 비쌉니다.** pdf가 바뀐 지점마다 그 시점의
+    PDF 두 개를 실제로 내려받아(중복은 제거) 텍스트를 뽑고 단어 단위로 비교합니다.
+    LLM은 쓰지 않습니다 — 전부 결정론적 계산(PyMuPDF + difflib)이라 비용은 없지만
+    OpenReview 왕복이 여러 번 붙어 첫 호출은 수 초가 걸릴 수 있습니다. 결과는
+    캐시되므로 두 번째 호출부터는 빠릅니다.
+
+    ⚠️ **IP 기준 시간당 10회로 제한됩니다** (`/revisions`의 30회보다 엄격 — 캐시
+    미스 1건의 비용이 훨씬 크기 때문). 429가 오면 잠시 뒤 다시 시도하세요.
+
+    ⚠️ `refresh=true`는 로그인이 필요합니다 (`/story`와 같은 이유 — 캐시를
+    우회하므로 무한정 재생성시키는 걸 막습니다).
+
+    응답 모양은 `/revisions`와 동일합니다(`FieldChange.field`가 자유 문자열이라
+    스키마 변경 없이 `"body"` 값이 추가됩니다). pdf가 교체된 각 리비전의 `changes`
+    배열에서 `field: "pdf"` 바로 다음에 `field: "body", kind: "text"` 항목이
+    붙어 있고, `similarity`와 `segments`(단어 단위 추가/삭제)를 담고 있습니다.
+    저장 공간을 아끼려고 `before`/`after`(전체 원문)는 담지 않습니다 — 필요하면
+    `segments`에서 `op != "insert"`(수정 전), `op != "delete"`(수정 후)만 걸러
+    이어 붙이면 재구성됩니다. 다운로드 실패·스캔본·페이지 상한 초과 등으로 일부
+    transition은 `body` 항목이 아예 없을 수 있습니다 — 그건 실패가 아니라 그
+    지점만 비교할 수 없었다는 뜻입니다.
+    """
+    if refresh and user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="캐시를 다시 만들려면 로그인이 필요합니다.",
+            headers={"WWW-Authenticate": "Bearer"})
+
+    revisions = get_paper_revisions_with_body(paper_id, refresh=refresh)
     if revisions is None:
         raise _NOT_FOUND
     return ApiResponse[RevisionsResponse](data=revisions)

@@ -149,17 +149,18 @@ CI의 DB에는 **코퍼스 데이터가 없습니다** (스키마만 있는 빈 
 
 ```bash
 git clone https://github.com/AICE-GACHON/AICE-FE.git
-cd AICE-FE && npm install && npm run dev
+cd AICE-FE
+npm install
+cp .env.example .env      # ← 빠뜨리기 쉽습니다. 아래 경고 참고
+npm run dev
 ```
 
-프론트는 `.env`의 `VITE_API_BASE_URL`로 백엔드를 찾습니다.
+프론트는 `.env`의 `VITE_API_BASE_URL`로 백엔드를 찾습니다 (`.env`는 gitignore라
+클론 직후에는 없습니다 — `.env.example`을 복사해야 합니다).
 
-```
-VITE_API_BASE_URL=http://localhost:8000
-```
-
-⚠️ **이 값이 비어 있으면 화면이 전부 mock 응답으로 돌아갑니다.** 백엔드를 껐는데도
-화면이 멀쩡히 동작한다면 십중팔구 이것 때문입니다.
+⚠️ **이 값이 비어 있으면 화면이 에러 없이 조용히 mock 응답으로 동작합니다.**
+백엔드를 껐는데도 화면이 멀쩡하거나, 가입·분석은 되는데 DB에 아무것도 안 쌓인다면
+십중팔구 `.env`를 안 만든 것입니다.
 
 | | 주소 |
 |---|---|

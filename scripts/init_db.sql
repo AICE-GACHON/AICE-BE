@@ -185,6 +185,17 @@ CREATE TABLE paper_stories (
     built_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ------------------------------------------------------- paper_body_diffs
+-- 리비전 본문(PDF) diff(query/revisions.py의 get_paper_revisions_with_body) 캐시.
+-- pdf가 교체된 지점마다 전후 PDF를 실제로 내려받아 텍스트를 뽑고 diff하므로
+-- paper_stories보다도 무겁다. LLM은 전혀 관여하지 않아 used_llm 컬럼은 없다.
+-- ⚠️ alembic 0013과 같은 정의다. 한쪽만 고치면 신규 컨테이너와 운영 DB가 어긋난다.
+CREATE TABLE paper_body_diffs (
+    paper_id BIGINT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+    payload  JSONB       NOT NULL,
+    built_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ---------------------------------------------------------- ingest_status
 -- 수집 재시작을 위한 체크포인트. 43,515편을 며칠에 걸쳐 나눠 받는다.
 CREATE TABLE ingest_status (

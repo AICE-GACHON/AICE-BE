@@ -35,6 +35,27 @@ class OnboardingCreate(BaseModel):
     result_order: list[Item] = Field(default=[], max_length=_MAX_ITEMS)
 
 
+class OnboardingUpdate(BaseModel):
+    """마이페이지에서 온보딩 답변을 고칠 때 쓴다 (PATCH /api/user/me/onboarding).
+
+    **보낸 필드만 갱신한다.** OnboardingCreate와 달리 리스트에도 `None` 기본값을
+    두는 이유가 여기 있다 — `default=[]`로 두면 "안 보냄"과 "비웠음"이 둘 다
+    빈 리스트가 되어, 닉네임 하나 고치려고 PATCH를 보냈을 뿐인데 관심 분야가
+    통째로 지워진다. `None`이면 건드리지 않고, `[]`면 의도적으로 비운 것이다.
+
+    상한은 OnboardingCreate와 같은 값을 쓴다. 이쪽은 인증이 필요해서 익명
+    엔드포인트만큼 급하진 않지만, **규칙이 갈리면 느슨한 쪽이 우회로가 된다** —
+    생성 때 막은 길이를 수정으로 넣을 수 있으면 막은 의미가 없다.
+    """
+    user_type: str | None = Field(default=None, max_length=_MAX_SHORT)
+    experience: str | None = Field(default=None, max_length=_MAX_SHORT)
+    purposes: list[Item] | None = Field(default=None, max_length=_MAX_ITEMS)
+    fields: list[Item] | None = Field(default=None, max_length=_MAX_ITEMS)
+    stage: str | None = Field(default=None, max_length=_MAX_SHORT)
+    venue: str | None = Field(default=None, max_length=_MAX_VENUE)
+    result_order: list[Item] | None = Field(default=None, max_length=_MAX_ITEMS)
+
+
 class OnboardingResponse(ORMBase, TimestampMixin):
     onboarding_id: uuid.UUID
     user_type: str | None
