@@ -25,12 +25,13 @@
 경계 테스트가 실패한다 — LLM 인스턴스나 그래프 컴파일 같은 내부 결정이 백엔드로
 새어 나가면, 여기를 고칠 때 app/까지 함께 깨진다.
 """
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:   # 런타임에는 임포트하지 않는다 (torch 로드 회피)
     from paper_assistant.schemas import (
-        PaperDetail, PaperListResponse, PaperRevisions, PaperStory, Report,
-        ReviewDetail)
+        PaperDetail, PaperListResponse, PaperRevisions, PaperStory,
+        ProgressEvent, Report, ReviewDetail)
 
 __all__ = [
     "analyze",
@@ -47,14 +48,25 @@ __all__ = [
 
 
 def analyze(title: str, abstract: str = "", pdf_bytes: bytes | None = None,
-            use_llm: bool | None = None) -> "Report":
+            use_llm: bool | None = None,
+            on_event: "Callable[[ProgressEvent], None] | None" = None) -> "Report":
     """논문 초안 하나를 분석해 종합 Report를 만든다.
 
     use_llm=None이면 설정값(PAPER_ASSISTANT_USE_LLM)을 따른다. 첫 호출은 SPECTER2
     로드로 수십 초 걸리므로 요청-응답 안에서 동기로 부르지 말 것.
+
+    on_event를 주면 단계가 바뀔 때마다 ProgressEvent를 넘겨준다 — 그 수 분의 대기
+    동안 "분석 중" 말고 무엇을 하고 있는지 보여주려면 이것을 받아 어딘가에 남겨야
+    한다. 안 주면 기존과 완전히 동일하게 돈다.
+
+        analyze(title, abstract, pdf_bytes=b, on_event=lambda ev: print(ev.label))
+
+    ⚠️ on_event는 **분석 스레드에서 동기로** 불린다. 느린 일(네트워크 등)을 여기서
+    하면 그만큼 분석이 늦어진다. 예외를 내도 분석은 계속된다.
     """
     from paper_assistant.graph.pipeline import analyze as _fn
-    return _fn(title, abstract, pdf_bytes=pdf_bytes, use_llm=use_llm)
+    return _fn(title, abstract, pdf_bytes=pdf_bytes, use_llm=use_llm,
+               on_event=on_event)
 
 
 def warmup(use_llm: bool | None = None) -> None:

@@ -23,6 +23,7 @@ from paper_assistant.graph.evidence import (
     validate_citations)
 from paper_assistant.llm import (
     RERANK_EFFORT, RERANK_MAX_TOKENS, SONNET, SONNET_EFFORT, SONNET_MAX_TOKENS)
+from paper_assistant.graph.progress import emit
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
@@ -34,10 +35,17 @@ log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- input
 def input_node(state: PipelineState, embedder, llm) -> dict:
-    """PDF면 제목/초록 추출, 텍스트면 통과."""
+    """PDF면 제목/초록 추출, 텍스트면 통과.
+
+    진행 이벤트는 **실제로 추출할 때만** 낸다. 업로드 단계에서 이미 뽑아둔 값이
+    넘어오는 것이 보통이라(POST /api/submissions/pdf), 그때는 이 노드가 하는 일이
+    없는데도 화면에 단계가 뜨면 "읽는 중"이 깜빡이고 사라진다.
+    """
     if state.get("pdf_bytes") and not state.get("query_abstract"):
         from paper_assistant.pdf.extract import extract_title_abstract
+        emit("extract", "논문에서 제목과 초록을 읽고 있어요")
         title, abstract = extract_title_abstract(state["pdf_bytes"], llm=llm)
+        emit("extract", "제목과 초록을 읽었어요", done=True, detail=title or None)
         return {"query_title": title, "query_abstract": abstract}
     return {}
 
@@ -51,11 +59,20 @@ def retrieval_node(state: PipelineState, embedder, llm) -> dict:
     """
     title = state["query_title"]
     abstract = state.get("query_abstract", "")
+    emit("retrieval", "비슷한 논문을 찾고 있어요")
     qvec = embedder.encode_one(title, abstract).numpy()
     results = hybrid_search(qvec, f"{title} {abstract}")
+    confidence = confidence_from(results)
+
+    # 신뢰도가 weak이면 여기서 바로 알린다. 다음 단계(재정렬)를 통째로 건너뛰게
+    # 만드는 판정이라, 알리지 않으면 사용자에게는 분석이 이유 없이 짧게 끝난
+    # 것으로만 보인다. message는 이미 사용자에게 보여주려고 쓴 문장이다
+    # (CONFIDENCE_MESSAGES) — evidence(코사인 평균)는 진단용이라 싣지 않는다.
+    emit("retrieval", f"후보 {len(results)}편을 찾았어요", done=True,
+         detail=None if confidence.is_reliable else confidence.message)
 
     return {"query_embedding": qvec.tolist(), "similar_papers": results,
-            "confidence": confidence_from(results)}
+            "confidence": confidence}
 
 
 def confidence_from(papers) -> RetrievalConfidence:
@@ -152,17 +169,26 @@ def llm_rerank_node(state: PipelineState, embedder, llm) -> dict:
       - pdf_bytes가 없다 → 옛 초안(텍스트로 만든 것). 넘길 원문이 없으니 스텁.
     """
     papers = state.get("similar_papers", [])
+    emit("rerank", "이 중에서 정말 비슷한 논문을 고르고 있어요")
     if not papers:
+        emit("rerank", "후보가 없어 고를 수 없었어요", done=True)
         return {"selections": []}
 
     confidence = state.get("confidence")
     if confidence is not None and not confidence.is_reliable:
         log.info("검색 신뢰도 weak — LLM 재정렬을 건너뜁니다.")
+        emit("rerank", "검색 결과를 믿기 어려워 선정을 건너뛰었어요", done=True,
+             detail=confidence.message)
         return {"selections": []}
 
+    # 아래 두 경우의 문구는 **LLM이 골랐다고 말하면 안 된다.** 스텁 결과가 판정으로
+    # 오인되면 개편의 효과를 잴 수 없다 (Report.used_llm과 같은 규약).
     pdf_bytes = state.get("pdf_bytes")
     if llm is None or not pdf_bytes:
-        return {"selections": _stub_selections(papers)}
+        selections = _stub_selections(papers)
+        emit("rerank", f"검색 상위 {len(selections)}편을 그대로 골랐어요", done=True,
+             detail="본문을 대조한 선정은 하지 않았어요")
+        return {"selections": selections}
 
     candidates = [{"paper_id": p.paper_id, "title": p.title,
                    "abstract": (p.abstract or "")[:1500],
@@ -173,7 +199,12 @@ def llm_rerank_node(state: PipelineState, embedder, llm) -> dict:
         _SELECTION_SCHEMA, max_tokens=RERANK_MAX_TOKENS,
         output_config={"effort": RERANK_EFFORT})
 
-    return {"selections": _validated_selections(raw.get("selections", []), papers)}
+    selections = _validated_selections(raw.get("selections", []), papers)
+    # 0편도 정직한 답이다 — 후보로 메우지 않는다(Report.selected_papers 주석).
+    emit("rerank",
+         f"본문을 대조해 {len(selections)}편을 골랐어요" if selections
+         else "본문을 대조해 보니 정말 비슷한 논문은 없었어요", done=True)
+    return {"selections": selections}
 
 
 def _stub_selections(papers) -> list[PaperSelection]:
@@ -235,8 +266,11 @@ def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
     """
     selections = state.get("selections", [])
     if not selections:
+        # 고른 논문이 없으면 이 단계는 할 일이 없다 — 화면에 단계를 세우지 않는다.
+        # 왜 없는지는 앞 단계(rerank)가 이미 말했다.
         return {"selected_papers": [], "selection_points": {}}
 
+    emit("review_fetch", "고른 논문들이 받은 리뷰를 모으고 있어요")
     ids = [s.paper_id for s in selections]
     with cursor() as cur:
         cur.execute(
@@ -300,6 +334,11 @@ def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
             rating_count=len(rs),
             rating_spread=round(max(ratings) - min(ratings), 2) if ratings else None,
         ))
+
+    emit("review_fetch",
+         f"논문 {len(selected)}편의 리뷰 {sum(p.rating_count for p in selected)}건을 "
+         f"모았어요", done=True,
+         detail=selected[0].title if selected else None)
     return {"selected_papers": selected,
             "selection_points": {p.paper_id: points.get(p.paper_id, [])
                                  for p in selected}}
@@ -310,6 +349,8 @@ def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
 # ---------------------------------------------------- synthesis (LLM)
 def synthesis_node(state: PipelineState, embedder, llm) -> dict:
     """선정 결과와 리뷰를 Report로 조립하고 마크다운 요약을 만든다."""
+    emit("synthesis", "모은 리뷰를 정리하고 있어요")
+
     # 검색 후보. **화면에 보여줄 것이 아니라 근거 추적용 기록이다** — 무엇을 보고
     # 무엇을 골랐는지 되짚을 수 있어야 재정렬의 품질을 나중에 잴 수 있다.
     similar = [
@@ -344,6 +385,7 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         citations=citations,
         summary_markdown=summary,
     )
+    emit("synthesis", "정리를 마쳤어요", done=True)
     return {"report": report}
 
 

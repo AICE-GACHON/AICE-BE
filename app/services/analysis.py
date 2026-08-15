@@ -17,11 +17,12 @@ analyze()는 stateless라 DB에 아무것도 쓰지 않는다. 결과를 사용�
 묶인 HTTP 관심사라, 여기로 끌고 오면 서비스가 FastAPI 요청 객체를 알아야 한다.
 이 모듈은 "어떤 행을 만들지"까지만 정하고, "언제 실행할지"는 호출자가 정한다.
 """
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -124,6 +125,48 @@ def matches_for(db: Session, prediction_id: uuid.UUID) -> list[SimilarPaperMatch
     ).all())
 
 
+# ---------------------------------------------------------------- 진행 기록
+
+# 진행 이벤트 1건을 progress 배열 **끝에 붙이는** SQL.
+#
+# ORM으로 읽어서 append하고 다시 넣지 않는 이유가 둘이다:
+#   (1) SQLAlchemy는 JSON 값의 제자리 변경을 추적하지 않는다 — prediction.progress
+#       .append(...)는 아무 일도 일으키지 않고 조용히 사라진다.
+#   (2) 읽고-고쳐-쓰기는 왕복이 두 번이고, 그 사이에 낀 쓰기를 덮어쓴다.
+# jsonb의 `||`는 배열끼리 이어 붙이므로 한 번의 UPDATE로 끝난다.
+_APPEND_PROGRESS = text("""
+    UPDATE review_predictions
+    SET progress = progress || CAST(:event AS jsonb)
+    WHERE prediction_id = :prediction_id
+""")
+
+
+def _progress_recorder(prediction_id: uuid.UUID):
+    """analyze(on_event=...)에 넘길 콜백을 만든다.
+
+    **분석 세션과 다른 세션을 쓴다.** 진행 기록은 분석의 곁가지라, 여기서 난 사고가
+    분석 트랜잭션을 오염시키면 안 된다 — 같은 세션을 쓰다가 UPDATE 하나가 실패하면
+    그 뒤의 _mark_failed()까지 함께 죽어서, 실패조차 기록하지 못하게 된다.
+
+    ⚠️ 이 콜백은 **분석 스레드에서 동기로** 불린다 (paper_assistant.analyze 주석).
+    분석 1회에 10건 남짓이라 왕복 비용은 무시할 만하지만, 여기에 느린 일을 더하면
+    그만큼 분석이 늦어진다.
+    """
+    def record(event) -> None:
+        db = SessionLocal()
+        try:
+            # 배열로 감싸 넘긴다 — jsonb `||`는 객체를 그대로 주면 병합으로 해석할
+            # 여지가 있고, 배열끼리면 의미가 하나뿐이다.
+            db.execute(_APPEND_PROGRESS,
+                       {"event": json.dumps([event.model_dump(mode="json")]),
+                        "prediction_id": prediction_id})
+            db.commit()
+        finally:
+            db.close()
+
+    return record
+
+
 # ------------------------------------------------------------------ 실제 실행
 
 
@@ -157,8 +200,12 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
             # PDF 원본을 함께 넘긴다. 1단계 검색은 제목·초록만 쓰지만 2단계 LLM
             # 재정렬이 본문·참고문헌을 봐야 하기 때문이다. 개편 이전에 만들어진
             # 초안은 pdf_bytes가 None이라 제목·초록만으로 돌아간다.
+            #
+            # on_event로 단계마다 progress 컬럼이 자라고, 폴링이 그것을 그대로
+            # 실어 나른다. 여기서 예외가 나도 분석은 계속된다(analyze가 삼킨다).
             report = analyze(title=submission.title, abstract=submission.abstract,
-                             pdf_bytes=submission.pdf_bytes)
+                             pdf_bytes=submission.pdf_bytes,
+                             on_event=_progress_recorder(prediction_id))
         except Exception:
             # 분석 실패는 서버 장애가 아니라 이 작업의 상태다. 사용자가 폴링으로
             # 확인할 수 있도록 failed로 기록하고 예외를 삼킨다.
