@@ -87,6 +87,7 @@ def test_password_longer_than_bcrypt_limit_is_rejected(client):
     """bcrypt는 72바이트를 넘는 입력을 조용히 잘라낸다. 거부하지 않으면 사용자가
     긴 비밀번호를 쓰고도 앞 72바이트만 보호받으면서 그 사실을 모른다."""
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "long@example.com", "password": "z" * 200,
         "nickname": "n", "openreview_id": f"~T{uuid.uuid4().hex[:8]}1"})
     assert res.status_code == 422

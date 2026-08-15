@@ -6,6 +6,7 @@ from tests.app.conftest import _unique_openreview_id
 def test_signup_returns_user_without_password(client):
     openreview_id = _unique_openreview_id()
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "brand-new@example.com", "password": "password123",
         "nickname": "새사용자", "openreview_id": openreview_id})
     assert res.status_code == 201
@@ -20,6 +21,7 @@ def test_signup_returns_user_without_password(client):
 
 def test_signup_rejects_duplicate_email(client, auth):
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": auth["email"], "password": "password123", "nickname": "중복",
         "openreview_id": _unique_openreview_id()})
     assert res.status_code == 409
@@ -34,11 +36,13 @@ def test_signup_rejects_duplicate_openreview_id(client):
     제약이 사라지면 여기서 201이 나온다.
     """
     first = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "orig@example.com", "password": "password123",
         "nickname": "원본", "openreview_id": "~Dup_Target1"})
     assert first.status_code == 201
 
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "another@example.com", "password": "password123",
         "nickname": "중복ID", "openreview_id": "~Dup_Target1"})
     assert res.status_code == 409
@@ -57,6 +61,7 @@ def test_signup_without_openreview_id_gets_placeholder(client, db):
     구분할 수 없다.
     """
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "no-id@example.com", "password": "password123",
         "nickname": "아이디없음"})
     assert res.status_code == 201
@@ -73,6 +78,7 @@ def test_signup_placeholders_are_unique_per_account(client, db):
     """
     for i in range(2):
         res = client.post("/api/auth/signup", json={
+            "agreed_to_terms": True,
             "email": f"placeholder{i}@example.com", "password": "password123",
             "nickname": f"사용자{i}"})
         assert res.status_code == 201, res.text
@@ -92,6 +98,7 @@ def test_placeholder_is_hidden_but_real_id_is_not(client, db):
     """
     real_id = _unique_openreview_id()
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "real-id@example.com", "password": "password123",
         "nickname": "진짜아이디", "openreview_id": real_id})
     assert res.status_code == 201
@@ -100,6 +107,7 @@ def test_placeholder_is_hidden_but_real_id_is_not(client, db):
 
 def test_signup_rejects_short_password(client):
     res = client.post("/api/auth/signup", json={
+        "agreed_to_terms": True,
         "email": "short@example.com", "password": "1234", "nickname": "짧음",
         "openreview_id": _unique_openreview_id()})
     assert res.status_code == 422

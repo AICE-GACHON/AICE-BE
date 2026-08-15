@@ -166,7 +166,8 @@ def google_only(client, monkeypatch):
     monkeypatch.setattr("app.routers.auth.verify_google_id_token",
                         lambda token: claims)
     res = client.post("/api/auth/google", json={
-        "id_token": "fake", "openreview_id": _unique_openreview_id()})
+        "id_token": "fake", "openreview_id": _unique_openreview_id(),
+        "agreed_to_terms": True})
     assert res.status_code == 200, res.text
     token = res.json()["data"]["access_token"]
     return {"headers": {"Authorization": f"Bearer {token}"}}

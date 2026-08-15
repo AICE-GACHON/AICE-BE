@@ -36,6 +36,9 @@ def _signup_payload(**overrides) -> dict:
         "password": "password123",
         "nickname": "tester",
         "openreview_id": _unique_openreview_id(),
+        # 이 파일이 보는 것은 초대 게이트뿐이다. 동의를 빼면 초대와 무관하게 400이
+        # 나서, 초대 코드가 실제로 작동하는지가 가려진다.
+        "agreed_to_terms": True,
     }
     payload.update(overrides)
     return payload
@@ -84,7 +87,8 @@ def test_wrong_code_does_not_leak_whether_email_exists(client, invite_required):
 # ----------------------------------------------------------------- 구글 가입
 
 def _google_login(client, **payload):
-    return client.post("/api/auth/google", json={"id_token": "fake-id-token", **payload})
+    return client.post("/api/auth/google", json={
+        "id_token": "fake-id-token", "agreed_to_terms": True, **payload})
 
 
 def _claims(**overrides) -> dict:
