@@ -60,7 +60,8 @@ def test_google_only_account_gets_the_same_response(client, monkeypatch):
               "email_verified": True, "name": "구글사용자"}
     monkeypatch.setattr("app.routers.auth.verify_google_id_token", lambda t: claims)
     assert client.post("/api/auth/google", json={
-        "id_token": "fake", "openreview_id": _unique_openreview_id()}).status_code == 200
+        "id_token": "fake", "openreview_id": _unique_openreview_id(),
+        "agreed_to_terms": True}).status_code == 200
 
     res = _forgot(client, claims["email"])
     assert res.status_code == 200, res.text

@@ -27,6 +27,32 @@ def get_me(current_user: User = Depends(get_current_user)):
     return ApiResponse[UserResponse](data=UserResponse.model_validate(current_user))
 
 
+@router.post("/me/consent", response_model=ApiResponse[UserResponse])
+def agree_to_current_terms(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """개정된 약관·개인정보처리방침에 다시 동의한다.
+
+    **가입 때 받은 동의는 그때 게시돼 있던 버전에 대한 것이다.** 문서를 고치고
+    app/core/legal.py의 버전을 올리면 기존 사용자는 consent_up_to_date가 false가
+    되는데, 이 엔드포인트가 없으면 그 상태에서 빠져나갈 방법이 없다 — 화면은
+    "재동의가 필요합니다"를 계속 띄우고 사용자는 아무것도 할 수 없다.
+
+    PATCH /me에 필드를 하나 더 붙이지 않고 별도 경로로 둔 이유는, 이건 프로필
+    수정이 아니라 **동의라는 사건**이기 때문이다. 닉네임 변경 요청에 동의 필드가
+    딸려 들어갈 수 있는 구조를 만들면, 나중에 로그를 봐도 사용자가 실제로 동의
+    화면을 봤는지 알 수 없다.
+
+    body가 없다 — 이 경로를 호출한 것 자체가 동의다. `agreed=false`를 받을 수
+    있게 두면 "동의를 철회한다"는 뜻으로 읽히는데, 그건 탈퇴이지 이 API가 아니다.
+    """
+    current_user.record_consent()
+    db.commit()
+    db.refresh(current_user)
+    return ApiResponse[UserResponse](data=UserResponse.model_validate(current_user))
+
+
 @router.patch("/me", response_model=ApiResponse[UserResponse])
 def update_me(
     payload: UserUpdateRequest,

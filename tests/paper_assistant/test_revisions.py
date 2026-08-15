@@ -4,9 +4,15 @@
 감싸여 오고, 삭제는 한 겹 더 들어간 {"value": {"delete": true}}이고, edit이 전체
 스냅샷이 아니라 부분 패치라는 것.
 """
+import threading
+
+import pytest
+
+from paper_assistant.pdf.extract import BodyExtract
+from paper_assistant.query import revisions as R
 from paper_assistant.query.revisions import (
     _classify, _diff_fields, _rematch_media_labels, _unwrap, _word_diff, attach_body_diffs,
-    _VersionExtract)
+    _MAX_DOWNLOAD_WORKERS, _prefetch_default, _version_from_body, _VersionExtract)
 from paper_assistant.schemas import FieldChange, PaperRevisions, RevisionEntry
 
 
@@ -193,6 +199,132 @@ def test_attach_body_diffs_dedupes_downloads_across_revisions():
 
     assert calls.count("u://b") == 1
     assert sorted(set(calls)) == ["u://a", "u://b", "u://c"]
+
+
+def test_attach_body_diffs_fetches_versions_concurrently():
+    """버전별 PDF는 동시에 가져온다 — 하나씩 순서대로 기다리지 않는다.
+
+    "빨라졌는지"를 시간으로 재면 CI에서 불안정하다. 대신 fetch 안에서 서로를
+    기다리게(Barrier) 만들어 **동시에 돌지 않으면 아예 끝나지 않도록** 한다 —
+    순차로 돌아가면 첫 호출이 barrier에서 시간 초과로 터진다.
+    """
+    revisions = _revisions_with([_pdf_change("u://a", "u://b")])
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_fetch(url):
+        barrier.wait()   # 두 fetch가 동시에 살아 있어야만 통과한다
+        return _version(f"body of {url}")
+
+    attach_body_diffs(revisions, fetch_version=fake_fetch)
+
+    assert [c.field for c in revisions.revisions[0].changes] == ["pdf", "body"]
+
+
+def test_attach_body_diffs_limits_concurrent_fetches():
+    """동시 다운로드 수에 상한을 둔다 — OpenReview가 429로 막지 않도록."""
+    urls = [f"u://v{i}" for i in range(_MAX_DOWNLOAD_WORKERS + 4)]
+    revisions = _revisions_with(*[[_pdf_change(a, b)] for a, b in zip(urls, urls[1:])])
+
+    lock = threading.Lock()
+    live = peak = 0
+
+    def fake_fetch(url):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        try:
+            return _version(f"body of {url}")
+        finally:
+            with lock:
+                live -= 1
+
+    attach_body_diffs(revisions, fetch_version=fake_fetch)
+
+    assert peak <= _MAX_DOWNLOAD_WORKERS
+
+
+# ----------------------------------------------- 실제 경로(다운로드/추출 분리)
+#
+# 실제 경로는 다운로드(스레드)와 추출(프로세스)을 나눠 돌린다. 여기서는
+# 프로세스를 띄우지 않고 — _parse_executor를 스레드 실행기로 바꿔 끼워 —
+# 그 분리와 결과 조립만 검증한다. "정말 프로세스로 도는가"는 코드가 아니라
+# 성능의 문제라 단위 테스트가 아니라 실측으로 확인했다(_MAX_PARSE_WORKERS 주석).
+
+def _body(text, images=None):
+    return BodyExtract(text=text, images=images or {}, box_texts={}, captions={},
+                       signatures={})
+
+
+@pytest.fixture
+def parse_in_threads(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setattr(R, "_parse_executor", lambda workers: ThreadPoolExecutor(workers))
+
+
+def test_prefetch_default_downloads_then_extracts(parse_in_threads, monkeypatch):
+    """URL마다 다운로드 1회 + 추출 1회, 결과는 URL에 제대로 짝지어진다."""
+    pdfs = {"u://a": b"PDF-A", "u://b": b"PDF-B"}
+    monkeypatch.setattr(R, "_download_pdf", lambda url: pdfs[url])
+    monkeypatch.setattr(R, "extract_body",
+                        lambda data, max_pages=None: _body(f"body of {data.decode()}"))
+
+    out = _prefetch_default(["u://a", "u://b"])
+
+    assert out["u://a"].text == "body of PDF-A"
+    assert out["u://b"].text == "body of PDF-B"
+
+
+def test_prefetch_default_skips_dead_links_but_keeps_the_rest(parse_in_threads, monkeypatch):
+    """죽은 링크(404)는 None으로 남기고 나머지는 그대로 추출한다 — 추출에도 안 보낸다."""
+    monkeypatch.setattr(R, "_download_pdf", lambda url: None if url == "u://dead" else b"PDF")
+    extracted = []
+
+    def fake_extract(data, max_pages=None):
+        extracted.append(data)
+        return _body("body")
+
+    monkeypatch.setattr(R, "extract_body", fake_extract)
+
+    out = _prefetch_default(["u://dead", "u://ok"])
+
+    assert out["u://dead"] is None
+    assert out["u://ok"].text == "body"
+    assert len(extracted) == 1
+
+
+def test_prefetch_default_falls_back_when_processes_are_unavailable(monkeypatch):
+    """프로세스를 못 띄우는 환경(권한이 막힌 컨테이너 등)에서는 이 프로세스에서 처리한다."""
+    monkeypatch.setattr(R, "_download_pdf", lambda url: b"PDF")
+    monkeypatch.setattr(R, "extract_body", lambda data, max_pages=None: _body("body"))
+
+    def no_processes(workers):
+        raise OSError("프로세스를 만들 수 없음")
+
+    monkeypatch.setattr(R, "_parse_executor", no_processes)
+
+    out = _prefetch_default(["u://a"])
+
+    assert out["u://a"].text == "body"
+
+
+def test_version_from_body_rejects_unusable_extractions():
+    """페이지 수 상한 초과(text=None)와 깨진 텍스트는 '비교 불가'로 걸러낸다."""
+    assert _version_from_body(_body(None)) is None
+    assert _version_from_body(_body("ᔥ ᖇ ᒍ " * 30)) is None
+    good = _version_from_body(_body("a perfectly ordinary sentence of body text"))
+    assert good is not None and good.text.startswith("a perfectly")
+
+
+def test_attach_body_diffs_propagates_fetch_errors():
+    """fetch가 던진 예외는 삼키지 않는다 — 순차로 가져오던 때와 같은 동작."""
+    revisions = _revisions_with([_pdf_change("u://a", "u://b")])
+
+    def boom(url):
+        raise RuntimeError("PDF 파싱 실패")
+
+    with pytest.raises(RuntimeError, match="PDF 파싱 실패"):
+        attach_body_diffs(revisions, fetch_version=boom)
 
 
 def test_attach_body_diffs_skips_when_url_missing():

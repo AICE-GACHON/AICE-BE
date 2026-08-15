@@ -508,6 +508,37 @@ class RetrievalConfidence(BaseModel):
         description="top-5 평균 코사인. **진단용 — 사용자에게 노출 금지**")
 
 
+class ProgressEvent(BaseModel):
+    """분석이 지금 어디까지 왔는지 1건 (analyze(on_event=...)로 흘러나온다).
+
+    **사용자 화면에 그대로 띄울 수 있는 단위다.** 분석은 수십 초~수 분이 걸리는데
+    그동안 백엔드가 아는 것이 pending/running뿐이라 화면도 "분석 중…" 한 줄밖에
+    쓸 수 없었다. 그 침묵을 없애려고 파이프라인이 단계마다 이걸 내보낸다.
+
+    `label`은 **한국어 완성 문장**이다. 화면이 step id로 문구를 만들지 않는 이유는,
+    같은 단계라도 실제로 한 일이 다르기 때문이다 — 재정렬은 LLM이 고른 경우와
+    검색 상위를 그대로 쓴 경우가 있고, 그 둘을 같은 문구로 덮으면 스텁 결과가
+    LLM 판정으로 오인된다(Report.used_llm과 같은 규약). 무엇을 했는지 아는 쪽이
+    문구를 만든다.
+
+    ⚠️ **진행률(%)은 담지 않는다.** 단계별 소요 시간이 극단적으로 불균등해서
+    (첫 호출 모델 로드 수십 초, 재정렬 수십 초, 나머지는 수 초) 어떤 비율도
+    사실이 아니게 된다. 유사도 점수를 만들지 않는 것과 같은 이유다(설계서 §20).
+    """
+    step: str = Field(
+        description="prepare | extract | retrieval | rerank | review_fetch | synthesis. "
+                    "화면이 단계 순서와 아이콘을 정하는 키")
+    done: bool = Field(
+        default=False,
+        description="False면 이 단계를 시작했다(진행 중), True면 끝났다. 같은 step으로 "
+                    "두 번 온다 — 화면은 step 기준으로 최신 것을 쓰면 된다")
+    label: str = Field(description="사용자에게 그대로 보여줄 한 줄")
+    detail: str | None = Field(
+        default=None,
+        description="곁들일 한 줄 (선정 논문 제목, 신뢰도 경고 등). 없을 수 있다")
+    at: str = Field(description="발생 시각 (ISO 8601, UTC)")
+
+
 class Report(BaseModel):
     """analyze()의 최종 반환. 프론트가 섹션별로 렌더링할 수 있도록 구조화."""
     query_title: str

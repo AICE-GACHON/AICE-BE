@@ -84,7 +84,9 @@ jobs:
           pip install -r /tmp/req-light.txt -r /tmp/req-dev-only.txt
 
       # DB가 없으므로 tests/app은 conftest가 통째로 skip한다 (의도된 동작).
-      # 제외한 5개는 paper_assistant.graph / .embedding을 거쳐 torch를 import한다.
+      # 제외한 6개는 paper_assistant.graph / .embedding을 거쳐 torch를 import한다.
+      # (test_progress.py는 nodes.emit을 monkeypatch하려고 paper_assistant.graph.nodes를
+      # import하는데, 그 모듈이 embedding.specter2 -> torch로 이어진다.)
       # 새 테스트가 여기서 ImportError로 죽는다면, torch에 의존하게 된 것이다 —
       # 이 목록에 추가하거나(= test 잡에서만 돌린다) 의존을 걷어낼 것.
       - name: pytest — torch가 필요한 파일 제외
@@ -94,6 +96,7 @@ jobs:
             --ignore=tests/paper_assistant/test_embedding.py \
             --ignore=tests/paper_assistant/test_evidence.py \
             --ignore=tests/paper_assistant/test_pipeline_structure.py \
+            --ignore=tests/paper_assistant/test_progress.py \
             --ignore=tests/paper_assistant/test_rerank.py
 
   test:

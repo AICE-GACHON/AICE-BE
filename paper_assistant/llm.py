@@ -7,12 +7,14 @@
 `get_llm(enabled=False)`(기본)는 None을 반환하고, 노드는 이때 결정론적
 스텁 출력을 생성한다 — DAG 배선을 $0으로 검증하기 위함.
 """
+import hashlib
 import json
 import logging
 
 from paper_assistant import config
 
 log = logging.getLogger(__name__)
+
 
 HAIKU = "claude-haiku-4-5"
 SONNET = "claude-sonnet-5"
@@ -38,6 +40,28 @@ RERANK_EFFORT = "high"
 # thinking과 본문의 **합계** 상한이다. 후보 50편을 견주는 추론이라 thinking이
 # 길고, 본문도 5편분 선정 이유가 들어간다. 잘리면 조용히 JSON이 깨진다.
 RERANK_MAX_TOKENS = 8000
+
+
+def _shape(text: str) -> str:
+    """응답을 **내용 없이** 설명한다. 파싱 실패 로그에 원문 대신 쓴다.
+
+    이 자리의 text는 논문 요약 — 사용자가 올린 미출간 원고의 내용이다. 예전에는
+    앞 120~200자를 그대로 로그에 남겼는데, 로그가 외부 수집기(Sentry·CloudWatch
+    등)로 흘러가면 그 자체가 유출 경로가 된다. 개인정보처리방침이 "운영 기록에
+    논문 본문이 남지 않는다"고 약속하므로(app/legal/privacy.md) 여기서 지켜야 한다.
+
+    그렇다고 아무것도 안 남기면 파싱 실패를 고칠 수 없다. 원문 없이도 원인을
+    가르는 세 가지만 남긴다:
+      - len  : 0이면 빈 응답, max_tokens 근처면 잘림
+      - kind : 코드펜스인지 산문인지 — 프롬프트 문제인지 모델 문제인지 갈린다
+      - sha  : 같은 실패가 반복되는지 대조용 지문 (원문 복원은 불가능)
+    """
+    if not text:
+        return "empty"
+    head = text.lstrip()[:1]
+    kind = {"{": "object", "[": "array", "`": "fence"}.get(head, "other")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    return f"len={len(text)} kind={kind} sha={digest}"
 
 
 class ClaudeLLM:
@@ -111,7 +135,7 @@ class ClaudeLLM:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            log.warning("JSON 파싱 실패: %s", text[:120])
+            log.warning("JSON 파싱 실패: %s", _shape(text))
             return {}
 
     def structured_with_pdf(self, model: str, system: str, pdf_bytes: bytes,
@@ -166,7 +190,7 @@ class ClaudeLLM:
             return json.loads(text)
         except json.JSONDecodeError:
             # 구조화 출력이 보장하므로 여기 오면 안 된다. 와도 검색 결과는 살린다.
-            log.warning("구조화 출력인데 JSON 파싱 실패: %s", text[:200])
+            log.warning("구조화 출력인데 JSON 파싱 실패: %s", _shape(text))
             return {}
 
     @staticmethod

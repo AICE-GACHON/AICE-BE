@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.errors import register_exception_handlers
 from app.core.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
 from app.core.rate_limit import limiter
-from app.routers import auth, corpus, onboarding, submissions, user
+from app.routers import auth, corpus, legal, onboarding, submissions, user
 from app.schemas.common import ApiResponse
 
 log = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ app.include_router(user.router)
 app.include_router(submissions.router)
 app.include_router(corpus.router)
 app.include_router(onboarding.router)
+app.include_router(legal.router)
 
 
 @app.get("/", response_model=ApiResponse[dict[str, str]])

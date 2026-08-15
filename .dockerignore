@@ -44,6 +44,16 @@ docs/
 .gitignore
 .dockerignore
 
+# 🔴 약관·개인정보처리방침만은 예외다. **앱이 런타임에 읽어서 API로 내보낸다**
+#    (GET /api/legal/{document}). 위 `**/*.md`에 걸려 이미지에서 빠지면, 로컬에서는
+#    멀쩡하고 배포에서만 회원가입 화면의 약관이 통째로 빈다 — 동의를 받아야 하는
+#    화면이 보여줄 내용을 못 찾는 상태다.
+#
+#    이 두 파일을 docs/가 아니라 app/legal/에 두는 이유도 그것이다. docs/는
+#    디렉터리째 제외돼 있어서, 그 안에 두면 되살릴 수 없다.
+#    (테스트가 이 예외를 지킨다: tests/app/test_legal_docs.py)
+!app/legal/*.md
+
 # 로컬 개발용 (Postgres 컨테이너). 배포는 RDS를 쓴다.
 docker-compose.yml
 

@@ -46,8 +46,12 @@ def google_claims(monkeypatch):
 
 
 def _google_login(client, **payload):
+    # agreed_to_terms는 **신규 가입일 때만** 쓰인다 (기존 계정 로그인/연동에서는
+    # 무시된다). 기본으로 넣어두면 이 파일의 매칭 분기 테스트가 동의 여부와
+    # 무관하게 돌아간다.
     return client.post("/api/auth/google",
-                       json={"id_token": "fake-id-token", **payload})
+                       json={"id_token": "fake-id-token",
+                             "agreed_to_terms": True, **payload})
 
 
 def test_verify_google_id_token_rejects_malformed_token():
