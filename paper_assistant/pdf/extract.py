@@ -29,6 +29,7 @@ import hashlib
 import logging
 import re
 import statistics
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
@@ -1139,9 +1140,9 @@ def _merged_box_rects(page) -> list:
     page.get_drawings()의 채우기 도형 중 페이지 폭의 절반 이상, 높이 20pt
     이상인 것을 후보로 본다(강조 밑줄 한 줄과 구분).
 
-    _box_regions와 extract_box_texts가 이 함수 하나를 공유해서 두 곳이 서로
-    다른 rect를 기준으로 계산해 어긋나는 일(해시가 본 텍스트와 유사도 비교가
-    본 텍스트가 다른 영역이 되는 것)이 없게 한다.
+    _box_regions_and_texts가 라벨(해시)과 내용 텍스트를 같은 rect 하나에서
+    한 번에 만들어, 두 값이 서로 다른 영역을 보고 어긋나는 일(해시가 본
+    텍스트와 유사도 비교가 본 텍스트가 다른 영역이 되는 것)이 없게 한다.
     """
     import fitz  # PyMuPDF
 
@@ -1170,8 +1171,15 @@ def _merged_box_rects(page) -> list:
     return merged
 
 
-def _box_regions(page, exclude: list[tuple[float, float]]) -> list[tuple[float, float, float, float, str]]:
+def _box_regions_and_texts(page, exclude: list[tuple[float, float]]
+                           ) -> tuple[list[tuple[float, float, float, float, str]], dict[str, str]]:
     """캡션 없이 배경색 박스로만 구분되는 영역(코드·프롬프트 인용 등)을 찾는다.
+
+    영역 목록 (top, bottom, x0, x1, label)과 {label: 내용 텍스트}를 **함께**
+    돌려준다. 라벨(해시)과 내용 텍스트는 어차피 같은 `_box_text(page, rect)`
+    한 번에서 나오는 값이라, 따로 뽑으면 같은 clip 재추출을 두 번 하게 된다.
+    텍스트가 빈 박스(순수 이미지)는 텍스트 쪽 dict에 키를 만들지 않는다 —
+    호출자가 없는 키를 "비교 재료 없음"으로 판단한다.
 
     Figure/Table/Algorithm처럼 "N번" 캡션이 있는 것들과 달리, 이런 박스는
     저자가 붙인 번호가 없다.
@@ -1195,12 +1203,17 @@ def _box_regions(page, exclude: list[tuple[float, float]]) -> list[tuple[float, 
     두 조각으로 쪼개짐) 원문에 없던 문단 경계가 생긴다.
     """
     regions = []
+    texts: dict[str, str] = {}
     for rect in _merged_box_rects(page):
         if any(top <= rect.y0 and rect.y1 <= bottom for top, bottom in exclude):
             continue
-        digest = _box_content_hash(page, rect)
-        regions.append((rect.y0, rect.y1, rect.x0, rect.x1, f"Box {digest}"))
-    return regions
+        text = _box_text(page, rect)
+        digest = _box_content_hash(page, rect, text)
+        label = f"Box {digest}"
+        regions.append((rect.y0, rect.y1, rect.x0, rect.x1, label))
+        if text:
+            texts[label] = text
+    return regions, texts
 
 
 def _box_text(page, rect) -> str:
@@ -1222,9 +1235,12 @@ def _box_text(page, rect) -> str:
     return " ".join(" ".join(parts).split())
 
 
-def _box_content_hash(page, rect) -> str:
+def _box_content_hash(page, rect, normalized: str) -> str:
     """박스 영역의 내용 해시. 텍스트가 있으면 텍스트를, 없으면(순수 이미지 등
     텍스트 레이어가 비는 경우) 픽셀을 해시한다.
+
+    normalized는 이 rect의 _box_text 결과다 — 호출부가 같은 텍스트를 유사도
+    비교용으로도 쓰므로, 여기서 다시 뽑지 않고 받아서 쓴다.
 
     ⚠️ **픽셀 해시만 쓰면 페이지 절대 위치에 흔들린다**(실측: 리비전 사이에
     같은 프롬프트 박스가 다른 페이지의 다른 y좌표로 밀렸을 뿐인데, 박스
@@ -1234,11 +1250,67 @@ def _box_content_hash(page, rect) -> str:
     조금이라도 바뀌면 자연히 다른 해시가 나와 원래 의도(내용 기준 식별)에
     더 맞는다.
     """
-    normalized = _box_text(page, rect)
     if normalized:
         return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:10]
     pix = page.get_pixmap(clip=rect, dpi=24)  # 텍스트가 없을 때만 쓰는 폴백
     return hashlib.sha1(pix.samples).hexdigest()[:10]
+
+
+@dataclass
+class _PageAnalysis:
+    """한 페이지를 "무엇이 어디에 있는가"로 정리한 결과.
+
+    본문 텍스트·이미지 크롭·박스 텍스트·캡션을 뽑는 네 가지 일이 전부 이
+    판단들(블록 경계, 그림/표/박스/수식 영역)을 똑같이 필요로 한다. 예전에는
+    네 함수가 각자 fitz.open부터 다시 해서 같은 계산을 문서당 네 번씩 했다 —
+    페이지마다 _ordered_blocks(블록 추출 + 겹침 병합 + clip 재추출),
+    _table_regions(find_tables + 괘선 스캔), _figure_regions, _equation_regions가
+    통째로 반복됐고 _repeating_rule_ys(전 페이지 드로잉 스캔)도 세 번 돌았다.
+    한 번만 계산해 이 객체에 담아 네 곳이 나눠 쓴다.
+
+    page(=fitz.Page)를 그대로 들고 있으므로 **문서가 열려 있는 동안에만
+    유효하다** — doc.close() 이후에 쓰면 안 된다. 이미지 크롭(get_pixmap)이
+    살아 있는 페이지를 필요로 해서 좌표만 담아둘 수는 없다.
+    """
+    page: object
+    blocks: list
+    table_regions: list
+    figure_regions: list
+    box_regions: list
+    box_texts: dict
+    equation_regions: list
+
+
+def _analyze_pages(doc) -> list[_PageAnalysis]:
+    """문서의 모든 페이지를 한 번씩만 분석한다 (_PageAnalysis 참고).
+
+    영역 사이의 의존 순서가 있다 — 표를 먼저 찾아야(표 하단 좌표) 그림
+    영역이 표 중간에서 시작하지 않고, 표·그림을 먼저 찾아야 그 안의 배경
+    사각형(표의 줄무늬, 그림의 배경 패널)을 박스로 오인하지 않는다. 이
+    순서는 예전에 네 함수가 각자 지키던 것과 동일하다.
+    """
+    excluded_rule_ys = _repeating_rule_ys(doc)
+    analyses = []
+    for pno in range(doc.page_count):
+        page = doc[pno]
+        blocks = _ordered_blocks(page)
+        table_regions = _table_regions(page, excluded_rule_ys)
+        table_bottoms = tuple(bottom for _, bottom, _, _, _ in table_regions)
+        figure_regions = _figure_regions(page, blocks, table_bottoms)
+        box_regions, box_texts = _box_regions_and_texts(page, exclude=[
+            (top, bottom) for top, bottom, _, _, _ in table_regions + figure_regions])
+        analyses.append(_PageAnalysis(
+            page=page, blocks=blocks, table_regions=table_regions,
+            figure_regions=figure_regions, box_regions=box_regions,
+            box_texts=box_texts, equation_regions=_equation_regions(page)))
+    return analyses
+
+
+def _box_texts_from(analyses: list[_PageAnalysis]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for a in analyses:
+        out.update(a.box_texts)
+    return out
 
 
 def extract_box_texts(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) -> dict[str, str]:
@@ -1248,6 +1320,9 @@ def extract_box_texts(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) -> dict
     같은 해시를 가진(=완전히 동일한) 박스는 attach_body_diffs가 이미 하나로
     합쳐서 다루므로, 서로 다른 해시를 가진 박스끼리 "완전히 다른 박스"인지
     "같은 박스가 살짝 수정된 것"인지 판단할 유사도 비교 재료로 쓴다.
+
+    네 가지를 다 뽑을 거라면 이걸 따로 부르지 말고 extract_body를 쓴다 —
+    문서 분석을 한 번만 하고 넷으로 나눠 준다.
     """
     import fitz  # PyMuPDF
 
@@ -1255,24 +1330,25 @@ def extract_box_texts(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) -> dict
     try:
         if doc.page_count > max_pages:
             return {}
-        out: dict[str, str] = {}
-        excluded_rule_ys = _repeating_rule_ys(doc)
-        for pno in range(doc.page_count):
-            page = doc[pno]
-            table_regions = _table_regions(page, excluded_rule_ys)
-            table_bottoms = tuple(bottom for _, bottom, _, _, _ in table_regions)
-            figure_regions = _figure_regions(page, _ordered_blocks(page), table_bottoms)
-            exclude = [(top, bottom) for top, bottom, _, _, _ in table_regions + figure_regions]
-            for rect in _merged_box_rects(page):
-                if any(top <= rect.y0 and rect.y1 <= bottom for top, bottom in exclude):
-                    continue
-                text = _box_text(page, rect)
-                if text:
-                    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
-                    out[f"Box {digest}"] = text
-        return out
+        return _box_texts_from(_analyze_pages(doc))
     finally:
         doc.close()
+
+
+def _media_captions_from_blocks(blocks: list) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for b in blocks:
+        if b[6] != 0:
+            continue
+        text = _flatten_block_text(b[4])
+        m = _CAPTION.match(text)
+        if m:
+            out[f"{m.group(1).title()} {m.group(2)}"] = text[m.end():].strip(" :.")
+            continue
+        m2 = _ALGO_CAPTION.match(text)
+        if m2:
+            out[f"Algorithm {m2.group(1)}"] = text[m2.end():].strip(" :.")
+    return out
 
 
 def extract_media_captions(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) -> dict[str, str]:
@@ -1289,6 +1365,10 @@ def extract_media_captions(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) ->
     갈린다(번호 앞자리만 다르고 나머지 설명은 저자가 그대로 재사용하기
     때문 — 실측: "Failure cases. The first two examples..."가 번호만
     바뀐 채 그대로 재사용됨).
+
+    캡션은 블록 텍스트만 보면 되므로(영역 계산이 필요 없다) 이 함수를 단독
+    호출하면 페이지마다 _ordered_blocks만 돈다. 네 가지를 다 뽑을 거라면
+    extract_body를 쓴다 — 그쪽은 이미 뽑아 둔 블록을 그대로 재사용한다.
     """
     import fitz  # PyMuPDF
 
@@ -1298,18 +1378,7 @@ def extract_media_captions(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) ->
             return {}
         out: dict[str, str] = {}
         for pno in range(doc.page_count):
-            page = doc[pno]
-            for b in _ordered_blocks(page):
-                if b[6] != 0:
-                    continue
-                text = _flatten_block_text(b[4])
-                m = _CAPTION.match(text)
-                if m:
-                    out[f"{m.group(1).title()} {m.group(2)}"] = text[m.end():].strip(" :.")
-                    continue
-                m2 = _ALGO_CAPTION.match(text)
-                if m2:
-                    out[f"Algorithm {m2.group(1)}"] = text[m2.end():].strip(" :.")
+            out.update(_media_captions_from_blocks(_ordered_blocks(doc[pno])))
         return out
     finally:
         doc.close()
@@ -1457,6 +1526,8 @@ def extract_full_text(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) -> str 
 
     fitz.open()을 한 번만 열어 페이지 수 확인과 텍스트 추출을 같은 문서 핸들로
     처리한다 (page_count()를 먼저 호출하고 여기서 또 여는 이중 오픈을 피함).
+    네 가지를 다 뽑을 거라면 extract_body를 쓴다 — 문서 분석(_analyze_pages)을
+    한 번만 하고 넷으로 나눠 준다.
     """
     import fitz  # PyMuPDF
 
@@ -1464,164 +1535,167 @@ def extract_full_text(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES) -> str 
     try:
         if doc.page_count > max_pages:
             return None
-        n_pages = doc.page_count
-        page_blocks = [_ordered_blocks(doc[i]) for i in range(n_pages)]
-
-        text_counter: dict[str, int] = {}
-        for blocks in page_blocks:
-            seen = set()
-            for b in blocks:
-                if b[6] != 0:
-                    continue
-                t = b[4].strip()
-                if t and t not in seen:
-                    text_counter[t] = text_counter.get(t, 0) + 1
-                    seen.add(t)
-        repeating = {t for t, c in text_counter.items()
-                    if n_pages >= 3 and c >= max(3, n_pages * 0.3)}
-
-        samples = [h for blocks in page_blocks for h in _line_height_samples(blocks)]
-        gap_threshold = (statistics.median(samples) if samples else 12.0) * 0.5
-
-        excluded_rule_ys = _repeating_rule_ys(doc)
-        paragraphs: list[str] = []
-        for i, blocks in enumerate(page_blocks):
-            table_regions = _table_regions(doc[i], excluded_rule_ys)
-            table_bottoms = tuple(bottom for _, bottom, _, _, _ in table_regions)
-            figure_regions = _figure_regions(doc[i], blocks, table_bottoms)
-            box_regions = _box_regions(doc[i], exclude=[
-                (top, bottom) for top, bottom, _, _, _ in table_regions + figure_regions])
-            equation_regions = _equation_regions(doc[i])
-            regions = figure_regions + table_regions + box_regions + equation_regions
-            # 캡션은 찾았는데(정규식 매칭) 정작 영역 계산엔 실패하는 경우가
-            # 있다(실측: 레이아웃이 특이한 논문에서 종종 발생 — find_tables()가
-            # 못 찾고 괘선 기반 fallback도 못 찾는 조합). 이럴 때 그냥 평소처럼
-            # "(표 N)" 자리표시자로 바꾸면, extract_media_images엔 그 라벨의
-            # 이미지가 없어서 프론트에서 빈 자리로 조용히 사라진다(MediaPiece가
-            # media를 못 찾으면 null 렌더) — 표가 통째로 안 보이는데 이유를 알
-            # 방법이 없다. 그래서 라벨이 실제로 영역을 확보했는지 미리 표시해
-            # 둔다(아래 캡션 처리에서 사용).
-            region_labels = {label for _, _, _, _, label in regions}
-            # Algorithm 캡션(콜론 없음)은 텍스트만으로 본문 서술과 구분이 안 되므로,
-            # _table_regions가 이미 괘선으로 기하학적 확인을 마친 라벨만 캡션으로
-            # 인정한다 — "Algorithm 1이 가장 좋다" 같은 본문 문장은 여기 없다.
-            confirmed_algo = {label for _, _, _, _, label in table_regions if label.startswith("Algorithm")}
-            # find_tables()/괘선으로 grid까지 확인해 이미 통째로 지운 표·알고리즘
-            # 라벨. 이 라벨의 본문은 위 regions 겹침 체크(870행)에서 이미 다
-            # 걸러지므로, 아래 skip_table_cells 2차 방어선을 또 걸면 안 된다 —
-            # 걸면 표 바로 다음에 오는, 우연히 8단어 이하인 무관한 텍스트(실측:
-            # 부록 소제목 "A.8\nLIMITATIONS")까지 "새어나온 표 셀"로 오인해
-            # 지워버린다.
-            grid_detected_labels = {label for _, _, _, _, label in table_regions}
-
-            entries = []
-            for b in blocks:
-                if b[6] != 0:
-                    continue  # 이미지 블록 자체는 여기서 다루지 않는다 — 캡션이 자리를 만든다
-                text = b[4].strip()
-                if not text:
-                    continue
-                tokens = text.split()
-                if all(_LINE_NUMBER.fullmatch(t) for t in tokens):
-                    continue
-                if text in repeating:
-                    continue
-
-                # ⚠️ **"blocks" 모드가 수식과 바로 다음 문단을 한 블록으로 묶어
-                # 돌려줄 때가 있다.** _equation_regions는 줄 단위로 정확한
-                # bbox를 찾지만(그래야 이미지가 수식만 딱 잘린다), 이 블록
-                # 자체는 여전히 "(1)\n다음 문단 148단어..." 형태로 뭉쳐 있어
-                # 완전 포함 조건(아래)에 안 걸리고 통째로 새어 나온다(실측).
-                # 이 블록이 수식 영역과 세로로 겹치면, 원본 줄바꿈이 살아있는
-                # b[4](flatten 전)에서 "(N)\n" 패턴 뒤쪽만 진짜 다음 문단으로
-                # 살리고 앞쪽(수식 자체)은 버린다 — 수식은 이미 별도
-                # placeholder로 표시되므로 버려도 데이터가 없어지지 않는다.
-                for eq_top, eq_bottom, _eq_x0, _eq_x1, eq_label in equation_regions:
-                    if not (b[1] < eq_bottom and b[3] > eq_top):
-                        continue
-                    num = eq_label.rsplit(" ", 1)[-1]
-                    m = re.search(r"\(" + re.escape(num) + r"\)\s*\n", b[4])
-                    if m:
-                        remainder = b[4][m.end():]
-                        b = (b[0], b[1], b[2], b[3], remainder, b[5], b[6])
-                        text = remainder.strip()
-                        tokens = text.split()
-                        break
-                if not text:
-                    continue
-
-                flat = _flatten_block_text(b[4])
-                algo_m = _ALGO_CAPTION.match(flat)
-                is_caption = bool(_CAPTION.match(flat)) or bool(
-                    algo_m and f"Algorithm {algo_m.group(1)}" in confirmed_algo)
-                # ⚠️ **세로 범위만 보면 안 된다.** 그림·표가 페이지 폭
-                # 일부만 차지하고 옆 칸에 본문이 계속되는 레이아웃(예: 왼쪽
-                # 그림+오른쪽 텍스트)에서, 세로 범위만 겹친다고 제외하면 그
-                # 옆 칸의 진짜 본문까지 통째로 사라진다 — 가로 범위도 같이
-                # 겹칠 때만(진짜 사각형 포함) 제외한다.
-                if not is_caption and any(
-                        top - _REGION_CONTAINMENT_TOLERANCE <= b[1]
-                        and b[3] <= bottom + _REGION_CONTAINMENT_TOLERANCE
-                        and x0 - _REGION_CONTAINMENT_TOLERANCE <= b[0]
-                        and b[2] <= x1 + _REGION_CONTAINMENT_TOLERANCE
-                        for top, bottom, x0, x1, _ in regions):
-                    continue  # 그림/표/알고리즘/박스 영역 안 — 캡션 자신은 항상 통과시킨다
-                # 캡션은 별도 kind로 표시해 _merge_close_text_blocks가 앞뒤 문단과
-                # 붙이지 않게 한다 — 붙으면 캡션 뒤 진짜 문단까지 "(그림 N)" 한
-                # 줄로 통째로 사라진다.
-                entries.append(("caption" if is_caption else "text", b))
-
-            # 박스는 원본 PDF에 캡션 블록이 없어(무기명) entries에 자연스럽게
-            # 낄 자리가 없다 — y좌표를 담은 가짜 블록으로 만들어 끼워 넣고
-            # 위치순으로 다시 정렬한다(Python sort는 안정 정렬이라 같은
-            # y좌표의 기존 순서는 그대로 유지된다).
-            for top, bottom, _x0, _x1, label in box_regions:
-                placeholder = f"({label.replace('Box ', '박스 ')})"
-                entries.append(("box", (0.0, top, 0.0, bottom, placeholder, -1, 0)))
-            # 수식도 박스처럼 본문에 캡션 블록이 따로 없다(번호만 오른쪽에 찍힘) —
-            # 같은 방식으로 가짜 블록에 플레이스홀더를 미리 만들어 끼워 넣는다.
-            for top, bottom, _x0, _x1, label in equation_regions:
-                placeholder = f"({label.replace('Equation ', '수식 ')})"
-                entries.append(("equation", (0.0, top, 0.0, bottom, placeholder, -1, 0)))
-            entries.sort(key=lambda kb: kb[1][1])
-
-            skip_table_cells = False
-            for kind, b in _merge_close_text_blocks(entries, gap_threshold):
-                text = _flatten_block_text(b[4])
-                if kind in ("box", "equation"):
-                    paragraphs.append(text)  # 이미 "(박스 <해시>)"/"(수식 N)" 형태로 만들어 둠
-                    skip_table_cells = False
-                    continue
-                if kind == "caption":
-                    m = _CAPTION.match(text)
-                    if m:
-                        kind_en, label_word, num = m.group(1).capitalize(), _CAPTION_LABEL_WORD[m.group(1).lower()], m.group(2)
-                    else:
-                        algo_m = _ALGO_CAPTION.match(text)
-                        kind_en, label_word, num = "Algorithm", "알고리즘", algo_m.group(1)
-                    if f"{kind_en} {num}" in region_labels:
-                        paragraphs.append(f"({label_word} {num})")
-                    else:
-                        # 영역을 못 찾아 extract_media_images에도 이 라벨의
-                        # 이미지가 없다 — 자리표시자로 바꾸면 프론트에서 아무
-                        # 표시 없이 사라지므로, 실패했다는 사실 자체를 캡션과
-                        # 함께 텍스트로 남긴다(원문은 이 캡션 바로 다음에
-                        # 이어지므로 skip_table_cells로 계속 걸러낸다).
-                        paragraphs.append(f"({label_word} {num} — 이미지 추출실패, 텍스트로 대체)\n\n{text}")
-                    skip_table_cells = (label_word in ("표", "알고리즘")
-                                        and f"{kind_en} {num}" not in grid_detected_labels)
-                    continue
-                if skip_table_cells:
-                    # 2차 방어선. find_tables()가 이 표를 못 찾아 _table_regions에
-                    # 안 걸렸을 때만 여기까지 온다 — 짧은 블록이면 표 셀로 보고 흡수.
-                    if len(text.split()) <= 8:
-                        continue
-                    skip_table_cells = False
-                paragraphs.append(text)
-
-        return "\n\n".join(_stitch_split_sentences(paragraphs))
+        return _full_text_from(_analyze_pages(doc))
     finally:
         doc.close()
+
+
+def _full_text_from(analyses: list[_PageAnalysis]) -> str:
+    """extract_full_text의 본체 — 이미 분석된 페이지들로 본문을 조립한다."""
+    n_pages = len(analyses)
+    page_blocks = [a.blocks for a in analyses]
+
+    text_counter: dict[str, int] = {}
+    for blocks in page_blocks:
+        seen = set()
+        for b in blocks:
+            if b[6] != 0:
+                continue
+            t = b[4].strip()
+            if t and t not in seen:
+                text_counter[t] = text_counter.get(t, 0) + 1
+                seen.add(t)
+    repeating = {t for t, c in text_counter.items()
+                if n_pages >= 3 and c >= max(3, n_pages * 0.3)}
+
+    samples = [h for blocks in page_blocks for h in _line_height_samples(blocks)]
+    gap_threshold = (statistics.median(samples) if samples else 12.0) * 0.5
+
+    paragraphs: list[str] = []
+    for analysis in analyses:
+        blocks = analysis.blocks
+        table_regions = analysis.table_regions
+        figure_regions = analysis.figure_regions
+        box_regions = analysis.box_regions
+        equation_regions = analysis.equation_regions
+        regions = figure_regions + table_regions + box_regions + equation_regions
+        # 캡션은 찾았는데(정규식 매칭) 정작 영역 계산엔 실패하는 경우가
+        # 있다(실측: 레이아웃이 특이한 논문에서 종종 발생 — find_tables()가
+        # 못 찾고 괘선 기반 fallback도 못 찾는 조합). 이럴 때 그냥 평소처럼
+        # "(표 N)" 자리표시자로 바꾸면, extract_media_images엔 그 라벨의
+        # 이미지가 없어서 프론트에서 빈 자리로 조용히 사라진다(MediaPiece가
+        # media를 못 찾으면 null 렌더) — 표가 통째로 안 보이는데 이유를 알
+        # 방법이 없다. 그래서 라벨이 실제로 영역을 확보했는지 미리 표시해
+        # 둔다(아래 캡션 처리에서 사용).
+        region_labels = {label for _, _, _, _, label in regions}
+        # Algorithm 캡션(콜론 없음)은 텍스트만으로 본문 서술과 구분이 안 되므로,
+        # _table_regions가 이미 괘선으로 기하학적 확인을 마친 라벨만 캡션으로
+        # 인정한다 — "Algorithm 1이 가장 좋다" 같은 본문 문장은 여기 없다.
+        confirmed_algo = {label for _, _, _, _, label in table_regions if label.startswith("Algorithm")}
+        # find_tables()/괘선으로 grid까지 확인해 이미 통째로 지운 표·알고리즘
+        # 라벨. 이 라벨의 본문은 위 regions 겹침 체크(870행)에서 이미 다
+        # 걸러지므로, 아래 skip_table_cells 2차 방어선을 또 걸면 안 된다 —
+        # 걸면 표 바로 다음에 오는, 우연히 8단어 이하인 무관한 텍스트(실측:
+        # 부록 소제목 "A.8\nLIMITATIONS")까지 "새어나온 표 셀"로 오인해
+        # 지워버린다.
+        grid_detected_labels = {label for _, _, _, _, label in table_regions}
+
+        entries = []
+        for b in blocks:
+            if b[6] != 0:
+                continue  # 이미지 블록 자체는 여기서 다루지 않는다 — 캡션이 자리를 만든다
+            text = b[4].strip()
+            if not text:
+                continue
+            tokens = text.split()
+            if all(_LINE_NUMBER.fullmatch(t) for t in tokens):
+                continue
+            if text in repeating:
+                continue
+
+            # ⚠️ **"blocks" 모드가 수식과 바로 다음 문단을 한 블록으로 묶어
+            # 돌려줄 때가 있다.** _equation_regions는 줄 단위로 정확한
+            # bbox를 찾지만(그래야 이미지가 수식만 딱 잘린다), 이 블록
+            # 자체는 여전히 "(1)\n다음 문단 148단어..." 형태로 뭉쳐 있어
+            # 완전 포함 조건(아래)에 안 걸리고 통째로 새어 나온다(실측).
+            # 이 블록이 수식 영역과 세로로 겹치면, 원본 줄바꿈이 살아있는
+            # b[4](flatten 전)에서 "(N)\n" 패턴 뒤쪽만 진짜 다음 문단으로
+            # 살리고 앞쪽(수식 자체)은 버린다 — 수식은 이미 별도
+            # placeholder로 표시되므로 버려도 데이터가 없어지지 않는다.
+            for eq_top, eq_bottom, _eq_x0, _eq_x1, eq_label in equation_regions:
+                if not (b[1] < eq_bottom and b[3] > eq_top):
+                    continue
+                num = eq_label.rsplit(" ", 1)[-1]
+                m = re.search(r"\(" + re.escape(num) + r"\)\s*\n", b[4])
+                if m:
+                    remainder = b[4][m.end():]
+                    b = (b[0], b[1], b[2], b[3], remainder, b[5], b[6])
+                    text = remainder.strip()
+                    tokens = text.split()
+                    break
+            if not text:
+                continue
+
+            flat = _flatten_block_text(b[4])
+            algo_m = _ALGO_CAPTION.match(flat)
+            is_caption = bool(_CAPTION.match(flat)) or bool(
+                algo_m and f"Algorithm {algo_m.group(1)}" in confirmed_algo)
+            # ⚠️ **세로 범위만 보면 안 된다.** 그림·표가 페이지 폭
+            # 일부만 차지하고 옆 칸에 본문이 계속되는 레이아웃(예: 왼쪽
+            # 그림+오른쪽 텍스트)에서, 세로 범위만 겹친다고 제외하면 그
+            # 옆 칸의 진짜 본문까지 통째로 사라진다 — 가로 범위도 같이
+            # 겹칠 때만(진짜 사각형 포함) 제외한다.
+            if not is_caption and any(
+                    top - _REGION_CONTAINMENT_TOLERANCE <= b[1]
+                    and b[3] <= bottom + _REGION_CONTAINMENT_TOLERANCE
+                    and x0 - _REGION_CONTAINMENT_TOLERANCE <= b[0]
+                    and b[2] <= x1 + _REGION_CONTAINMENT_TOLERANCE
+                    for top, bottom, x0, x1, _ in regions):
+                continue  # 그림/표/알고리즘/박스 영역 안 — 캡션 자신은 항상 통과시킨다
+            # 캡션은 별도 kind로 표시해 _merge_close_text_blocks가 앞뒤 문단과
+            # 붙이지 않게 한다 — 붙으면 캡션 뒤 진짜 문단까지 "(그림 N)" 한
+            # 줄로 통째로 사라진다.
+            entries.append(("caption" if is_caption else "text", b))
+
+        # 박스는 원본 PDF에 캡션 블록이 없어(무기명) entries에 자연스럽게
+        # 낄 자리가 없다 — y좌표를 담은 가짜 블록으로 만들어 끼워 넣고
+        # 위치순으로 다시 정렬한다(Python sort는 안정 정렬이라 같은
+        # y좌표의 기존 순서는 그대로 유지된다).
+        for top, bottom, _x0, _x1, label in box_regions:
+            placeholder = f"({label.replace('Box ', '박스 ')})"
+            entries.append(("box", (0.0, top, 0.0, bottom, placeholder, -1, 0)))
+        # 수식도 박스처럼 본문에 캡션 블록이 따로 없다(번호만 오른쪽에 찍힘) —
+        # 같은 방식으로 가짜 블록에 플레이스홀더를 미리 만들어 끼워 넣는다.
+        for top, bottom, _x0, _x1, label in equation_regions:
+            placeholder = f"({label.replace('Equation ', '수식 ')})"
+            entries.append(("equation", (0.0, top, 0.0, bottom, placeholder, -1, 0)))
+        entries.sort(key=lambda kb: kb[1][1])
+
+        skip_table_cells = False
+        for kind, b in _merge_close_text_blocks(entries, gap_threshold):
+            text = _flatten_block_text(b[4])
+            if kind in ("box", "equation"):
+                paragraphs.append(text)  # 이미 "(박스 <해시>)"/"(수식 N)" 형태로 만들어 둠
+                skip_table_cells = False
+                continue
+            if kind == "caption":
+                m = _CAPTION.match(text)
+                if m:
+                    kind_en, label_word, num = m.group(1).capitalize(), _CAPTION_LABEL_WORD[m.group(1).lower()], m.group(2)
+                else:
+                    algo_m = _ALGO_CAPTION.match(text)
+                    kind_en, label_word, num = "Algorithm", "알고리즘", algo_m.group(1)
+                if f"{kind_en} {num}" in region_labels:
+                    paragraphs.append(f"({label_word} {num})")
+                else:
+                    # 영역을 못 찾아 extract_media_images에도 이 라벨의
+                    # 이미지가 없다 — 자리표시자로 바꾸면 프론트에서 아무
+                    # 표시 없이 사라지므로, 실패했다는 사실 자체를 캡션과
+                    # 함께 텍스트로 남긴다(원문은 이 캡션 바로 다음에
+                    # 이어지므로 skip_table_cells로 계속 걸러낸다).
+                    paragraphs.append(f"({label_word} {num} — 이미지 추출실패, 텍스트로 대체)\n\n{text}")
+                skip_table_cells = (label_word in ("표", "알고리즘")
+                                    and f"{kind_en} {num}" not in grid_detected_labels)
+                continue
+            if skip_table_cells:
+                # 2차 방어선. find_tables()가 이 표를 못 찾아 _table_regions에
+                # 안 걸렸을 때만 여기까지 온다 — 짧은 블록이면 표 셀로 보고 흡수.
+                if len(text.split()) <= 8:
+                    continue
+                skip_table_cells = False
+            paragraphs.append(text)
+
+    return "\n\n".join(_stitch_split_sentences(paragraphs))
 
 
 def extract_media_images(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES,
@@ -1634,10 +1708,10 @@ def extract_media_images(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES,
     모양과 많이 달라졌다 — 텍스트로 재구성하는 것보다 영역을 그대로 이미지로
     잘라 원본과 최대한 비슷하게 보여주는 쪽이 낫다고 판단해 통일했다.
 
-    코드·프롬프트 인용처럼 캡션도 grid도 없는 "박스"(_box_regions)도 같은
-    방식으로 잘라 낸다 — 순수 텍스트로 뽑으면 들여쓰기·수식 기호(예:
+    코드·프롬프트 인용처럼 캡션도 grid도 없는 "박스"(_box_regions_and_texts)도
+    같은 방식으로 잘라 낸다 — 순수 텍스트로 뽑으면 들여쓰기·수식 기호(예:
     "M ←˜ M")가 다 깨져서 원문과 전혀 다른 모양이 된다. 라벨은 저자 번호가
-    없어 내용 해시를 쓴다(_box_regions 참고).
+    없어 내용 해시를 쓴다(_box_regions_and_texts 참고).
 
     dpi=72: 100dpi 대비 캐시 payload가 거의 절반이면서(실측: 논문 한 편 기준
     1.89MB → 1MB) 텍스트가 있는 다이어그램도 읽을 수 있는 수준은 유지된다.
@@ -1650,10 +1724,14 @@ def extract_media_images(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES,
     않는다. 대신 **"Figure N" 캡션 바로 앞의 마지막 '진짜 본문 문단'(20단어
     초과) 끝부터 캡션 끝까지**(_figure_regions)를 그림 전체 영역으로, **find_tables()나
     괘선으로 찾은 bbox**(_table_regions)를 표·알고리즘 영역으로, **배경색
-    사각형의 bbox**(_box_regions)를 박스 영역으로 보고 페이지 폭 전체를 그
-    높이만큼 크롭한다 — extract_full_text가 같은 영역을 본문에서 지우는
-    것과 동일한 판단 기준을 쓴다. 영역 여러 개가 사이에 본문 없이 연달아
-    나오면 앞 영역과 겹칠 수 있다(드문 경우로 보고 감수한다).
+    사각형의 bbox**(_box_regions_and_texts)를 박스 영역으로 보고 페이지 폭
+    전체를 그 높이만큼 크롭한다 — extract_full_text가 같은 영역을 본문에서
+    지우는 것과 동일한 판단 기준을 쓴다(그래서 둘이 _PageAnalysis 하나를
+    나눠 쓴다). 영역 여러 개가 사이에 본문 없이 연달아 나오면 앞 영역과
+    겹칠 수 있다(드문 경우로 보고 감수한다).
+
+    네 가지를 다 뽑을 거라면 extract_body를 쓴다 — 문서 분석을 한 번만 하고
+    넷으로 나눠 준다.
     """
     import fitz  # PyMuPDF
 
@@ -1661,65 +1739,125 @@ def extract_media_images(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES,
     try:
         if doc.page_count > max_pages:
             return {}
-        out: dict[str, bytes] = {}
-        excluded_rule_ys = _repeating_rule_ys(doc)
-        for pno in range(doc.page_count):
-            page = doc[pno]
-            ordered_blocks = _ordered_blocks(page)
-            table_regions = _table_regions(page, excluded_rule_ys)
-            table_bottoms = tuple(bottom for _, bottom, _, _, _ in table_regions)
-            figure_regions = _figure_regions(page, ordered_blocks, table_bottoms)
-            box_regions = _box_regions(page, exclude=[
-                (top, bottom) for top, bottom, _, _, _ in table_regions + figure_regions])
-            equation_regions = _equation_regions(page)
-            page_rect = page.rect
-            # 페이지 높이에 상대적인 상한을 쓴다 — 고정값(예: 600pt)은 페이지
-            # 대부분을 차지하는 큰 그림(실측: region_top이 페이지 맨 위인
-            # 정당한 경우, 높이 700pt)까지 오탐으로 잘라버린다.
-            max_height = page_rect.height * 0.9
-            for top, bottom, x0, x1, label in (table_regions + figure_regions + box_regions
-                                                + equation_regions):
-                if (x1 - x0) >= page_rect.width * _FULL_WIDTH_REGION_RATIO:
-                    # 페이지 폭 대부분을 차지하는 보통 경우 — 기존 그대로
-                    # 페이지 여백만 20pt 남기고 전체 폭을 쓴다.
-                    bbox = fitz.Rect(page_rect.x0 + 20, max(top, 0),
-                                     page_rect.x1 - 20, bottom + 5)
-                else:
-                    # 그림·표가 페이지 폭 일부만 차지하고 옆 칸에 본문이
-                    # 이어지는 레이아웃 — 실제 내용 폭만큼만 크롭해서 옆 칸
-                    # 텍스트가 이미지에 같이 찍히지 않게 한다. 좌우 여백은
-                    # 기본 10pt를 두되, 그 여백 안에(옆 칸 본문처럼 세로로
-                    # 겹치면서 x범위는 이 영역 밖인) 진짜 텍스트 블록이 있으면
-                    # 그 블록 바로 앞에서 멈춘다 — 안 그러면 좁은 여백 안으로
-                    # 옆 칸 글자 몇 개가 삐져 들어온다(실측: 우측 칸 텍스트의
-                    # 첫 몇 글자가 크롭 오른쪽 끝에 잘려서 찍힘).
-                    # 옆 블록이 이 영역 경계에 딱 붙어 있지 않고 걸쳐
-                    # 있을(예: 좁은 캡션 옆에서 재개된 전체 폭 문단처럼
-                    # x0는 이 영역 안, x1은 밖으로 걸침) 수도 있으므로,
-                    # "옆에서 시작하는" 블록뿐 아니라 "이 영역 밖으로 걸쳐
-                    # 넘어가는" 블록도 같이 본다 — 두 경우 다 여백을 그
-                    # 블록 쪽 경계까지로 줄인다(마진 없이 딱 붙임).
-                    pad_x0, pad_x1 = x0 - 10, x1 + 10
-                    for ob in ordered_blocks:
-                        if ob[6] != 0 or ob[1] >= bottom or ob[3] <= top:
-                            continue
-                        if ob[0] >= x0 and ob[0] < x1 and ob[2] <= x1:
-                            continue  # 이 영역 자신의 내용(캡션 등) — 무시
-                        if ob[0] >= x1 and ob[0] < pad_x1:
-                            pad_x1 = ob[0] - 2
-                        elif ob[2] > x1 and ob[0] < pad_x1:
-                            pad_x1 = min(pad_x1, x1)
-                        if ob[2] <= x0 and ob[2] > pad_x0:
-                            pad_x0 = ob[2] + 2
-                        elif ob[0] < x0 and ob[2] > pad_x0:
-                            pad_x0 = max(pad_x0, x0)
-                    bbox = fitz.Rect(max(page_rect.x0, pad_x0), max(top, 0),
-                                     min(page_rect.x1, pad_x1), bottom + 5)
-                if bbox.height < _MIN_CROP_HEIGHT or bbox.height > max_height:
-                    continue  # 말이 안 되는 크기는 오탐으로 보고 버린다
-                pix = page.get_pixmap(clip=bbox, dpi=dpi)
-                out[label] = pix.tobytes("png")
-        return out
+        return _media_images_from(_analyze_pages(doc), dpi)
+    finally:
+        doc.close()
+
+
+def _media_images_from(analyses: list[_PageAnalysis], dpi: int) -> dict[str, bytes]:
+    """extract_media_images의 본체 — 이미 분석된 페이지들에서 영역을 크롭한다."""
+    import fitz  # PyMuPDF
+
+    out: dict[str, bytes] = {}
+    for analysis in analyses:
+        page = analysis.page
+        ordered_blocks = analysis.blocks
+        table_regions = analysis.table_regions
+        figure_regions = analysis.figure_regions
+        box_regions = analysis.box_regions
+        equation_regions = analysis.equation_regions
+        page_rect = page.rect
+        # 페이지 높이에 상대적인 상한을 쓴다 — 고정값(예: 600pt)은 페이지
+        # 대부분을 차지하는 큰 그림(실측: region_top이 페이지 맨 위인
+        # 정당한 경우, 높이 700pt)까지 오탐으로 잘라버린다.
+        max_height = page_rect.height * 0.9
+        for top, bottom, x0, x1, label in (table_regions + figure_regions + box_regions
+                                            + equation_regions):
+            if (x1 - x0) >= page_rect.width * _FULL_WIDTH_REGION_RATIO:
+                # 페이지 폭 대부분을 차지하는 보통 경우 — 기존 그대로
+                # 페이지 여백만 20pt 남기고 전체 폭을 쓴다.
+                bbox = fitz.Rect(page_rect.x0 + 20, max(top, 0),
+                                 page_rect.x1 - 20, bottom + 5)
+            else:
+                # 그림·표가 페이지 폭 일부만 차지하고 옆 칸에 본문이
+                # 이어지는 레이아웃 — 실제 내용 폭만큼만 크롭해서 옆 칸
+                # 텍스트가 이미지에 같이 찍히지 않게 한다. 좌우 여백은
+                # 기본 10pt를 두되, 그 여백 안에(옆 칸 본문처럼 세로로
+                # 겹치면서 x범위는 이 영역 밖인) 진짜 텍스트 블록이 있으면
+                # 그 블록 바로 앞에서 멈춘다 — 안 그러면 좁은 여백 안으로
+                # 옆 칸 글자 몇 개가 삐져 들어온다(실측: 우측 칸 텍스트의
+                # 첫 몇 글자가 크롭 오른쪽 끝에 잘려서 찍힘).
+                # 옆 블록이 이 영역 경계에 딱 붙어 있지 않고 걸쳐
+                # 있을(예: 좁은 캡션 옆에서 재개된 전체 폭 문단처럼
+                # x0는 이 영역 안, x1은 밖으로 걸침) 수도 있으므로,
+                # "옆에서 시작하는" 블록뿐 아니라 "이 영역 밖으로 걸쳐
+                # 넘어가는" 블록도 같이 본다 — 두 경우 다 여백을 그
+                # 블록 쪽 경계까지로 줄인다(마진 없이 딱 붙임).
+                pad_x0, pad_x1 = x0 - 10, x1 + 10
+                for ob in ordered_blocks:
+                    if ob[6] != 0 or ob[1] >= bottom or ob[3] <= top:
+                        continue
+                    if ob[0] >= x0 and ob[0] < x1 and ob[2] <= x1:
+                        continue  # 이 영역 자신의 내용(캡션 등) — 무시
+                    if ob[0] >= x1 and ob[0] < pad_x1:
+                        pad_x1 = ob[0] - 2
+                    elif ob[2] > x1 and ob[0] < pad_x1:
+                        pad_x1 = min(pad_x1, x1)
+                    if ob[2] <= x0 and ob[2] > pad_x0:
+                        pad_x0 = ob[2] + 2
+                    elif ob[0] < x0 and ob[2] > pad_x0:
+                        pad_x0 = max(pad_x0, x0)
+                bbox = fitz.Rect(max(page_rect.x0, pad_x0), max(top, 0),
+                                 min(page_rect.x1, pad_x1), bottom + 5)
+            if bbox.height < _MIN_CROP_HEIGHT or bbox.height > max_height:
+                continue  # 말이 안 되는 크기는 오탐으로 보고 버린다
+            pix = page.get_pixmap(clip=bbox, dpi=dpi)
+            out[label] = pix.tobytes("png")
+    return out
+
+
+@dataclass
+class BodyExtract:
+    """리비전 본문 diff가 PDF 한 버전에서 필요로 하는 것 전부.
+
+    dataclass 하나에 모아 둔 덕에 **프로세스 경계를 그대로 넘어간다** —
+    호출부(revisions._prefetch_default)가 PDF마다 자식 프로세스에서
+    extract_body를 돌리고 이 객체를 받아 온다.
+    """
+    text: str | None                      # 페이지 수 상한을 넘으면 None
+    images: dict[str, bytes]              # "Figure N"/"Table N"/"Box <해시>" → PNG
+    box_texts: dict[str, str]             # "Box <해시>" → 내용 텍스트
+    captions: dict[str, str]              # "Figure N" 등 → 캡션 설명문(번호 제외)
+    signatures: dict[str, bytes]          # 그림·표·알고리즘 → 시각 시그니처
+
+
+def extract_body(pdf_bytes: bytes, max_pages: int = MAX_BODY_PAGES,
+                 dpi: int = 72) -> BodyExtract:
+    """본문 텍스트·이미지·박스 텍스트·캡션을 **문서 한 번 분석으로** 다 뽑는다.
+
+    extract_full_text / extract_media_images / extract_box_texts /
+    extract_media_captions를 차례로 부르는 것과 결과가 같지만, 넷이 똑같이
+    필요로 하는 계산(fitz.open, 페이지별 블록 추출, 그림·표·박스·수식 영역
+    판단, 문서 전체 괘선 스캔)을 네 번이 아니라 한 번만 한다 — 리비전 본문
+    diff는 이 넷을 항상 같이 쓰므로 따로 부를 이유가 없다.
+
+    페이지 수가 max_pages를 넘으면 전부 비운 채로 돌려준다(text=None) —
+    각 함수가 따로 하던 판단과 같다. 왜 자르지 않고 통째로 포기하는지는
+    extract_full_text 참고.
+    """
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        if doc.page_count > max_pages:
+            return BodyExtract(text=None, images={}, box_texts={}, captions={}, signatures={})
+        analyses = _analyze_pages(doc)
+        captions: dict[str, str] = {}
+        for analysis in analyses:
+            captions.update(_media_captions_from_blocks(analysis.blocks))
+        images = _media_images_from(analyses, dpi)
+        # 박스는 이미 내용 해시가 라벨이라(_box_regions_and_texts) 시그니처로
+        # 다시 짝지을 이유가 없다 — 그림·표·알고리즘만 만든다. 이미지가 여기
+        # 갓 만들어져 있을 때 같이 계산해 두면, 호출부가 프로세스 경계 너머로
+        # PNG를 다시 받아다 계산하는 왕복을 안 해도 된다.
+        signatures = {label: image_signature(png) for label, png in images.items()
+                      if not label.startswith("Box")}
+        return BodyExtract(
+            text=_full_text_from(analyses),
+            images=images,
+            box_texts=_box_texts_from(analyses),
+            captions=captions,
+            signatures=signatures)
     finally:
         doc.close()
 
