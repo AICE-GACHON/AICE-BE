@@ -397,6 +397,7 @@ import입니다 — `import paper_assistant` 자체는 가볍습니다.
 | `evidence` | 인용 가능한 **검색된 원문** — 리뷰 지적 문장(E*) + AC 메타리뷰(M*) |
 | `citations` | 요약이 실제로 인용한 라벨. 지어낸 라벨은 제거되므로 링크는 유효하다 (원문이 그 주장을 뒷받침하는지까지는 미검증) |
 | `used_llm` | 이 리포트가 실제 LLM 호출로 만들어졌는지 (근거 추적용) |
+| `preferences` | 이 분석에 **실제로 적용된** 온보딩 선호 (`similarity_focus`, `recency_bias`). 온보딩 테이블의 현재 값이 아니라 이 실행이 쓴 값이라, 사용자가 마이페이지에서 답을 바꿔도 지난 분석의 기록은 그대로다 |
 
 ⚠️ **2026-08-06 개편으로 없어진 필드**: `review_patterns`, `venue_trends`,
 `rating_context`, `resubmission_flows`. 통계 레이어를 통째로 걷어냈습니다 — 5편 위에서는
