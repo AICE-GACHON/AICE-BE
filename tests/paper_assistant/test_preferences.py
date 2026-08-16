@@ -13,10 +13,22 @@ from array import array
 
 import pytest
 
-from paper_assistant.graph import nodes
 from paper_assistant.retrieval.hybrid_search import balanced_weights, ranking_weights
 from paper_assistant.schemas import (
     RECENCY_BIAS_VALUES, SIMILARITY_FOCUS_VALUES, SearchPreferences)
+
+
+@pytest.fixture
+def nodes():
+    """파이프라인 노드 모듈. **임포트만으로 torch가 딸려 온다** (nodes → specter2).
+
+    그래서 픽스처로 감싼다. CI의 '빠른 검사'에는 torch가 없는데, 파일 맨 위에서
+    임포트하면 그 잡이 이 파일을 수집하다 통째로 죽는다 — 실제로 죽었다.
+    픽스처로 두면 배선 테스트만 건너뛰고, 아래 값 검증(프롬프트 인젝션을 막는
+    화이트리스트가 여기 있다)은 torch 없이도 계속 돈다. 그 검사야말로 빠른
+    잡에서 매번 돌아야 하는 것이다.
+    """
+    return pytest.importorskip("paper_assistant.graph.nodes")
 
 
 # ------------------------------------------------------------ 값 검증
@@ -99,7 +111,7 @@ class _FakeEmbedder:
         return _Vec()
 
 
-def _capture_search(monkeypatch):
+def _capture_search(monkeypatch, nodes):
     """nodes.hybrid_search를 가로채 호출 인자를 돌려준다."""
     captured = {}
 
@@ -112,9 +124,9 @@ def _capture_search(monkeypatch):
 
 
 @pytest.mark.parametrize("bias", RECENCY_BIAS_VALUES)
-def test_retrieval_passes_the_users_preset_to_the_search(monkeypatch, bias):
+def test_retrieval_passes_the_users_preset_to_the_search(monkeypatch, nodes, bias):
     """recency_bias가 검색에 닿지 않으면 가중치 프리셋은 죽은 코드다."""
-    captured = _capture_search(monkeypatch)
+    captured = _capture_search(monkeypatch, nodes)
     nodes.retrieval_node(
         {"query_title": "T", "query_abstract": "A",
          "preferences": SearchPreferences(recency_bias=bias)},
@@ -122,21 +134,21 @@ def test_retrieval_passes_the_users_preset_to_the_search(monkeypatch, bias):
     assert captured["weights"] == ranking_weights(bias)
 
 
-def test_retrieval_without_preferences_uses_the_default_preset(monkeypatch):
+def test_retrieval_without_preferences_uses_the_default_preset(monkeypatch, nodes):
     """옛 호출자(선호 없이 만든 상태)도 그대로 돌아야 한다."""
-    captured = _capture_search(monkeypatch)
+    captured = _capture_search(monkeypatch, nodes)
     nodes.retrieval_node({"query_title": "T", "query_abstract": "A"},
                          embedder=_FakeEmbedder(), llm=None)
     assert captured["weights"] == balanced_weights()
 
 
-def test_similarity_focus_does_not_touch_the_search(monkeypatch):
+def test_similarity_focus_does_not_touch_the_search(monkeypatch, nodes):
     """1단계 임베딩은 문제/방법/평가를 구분하지 못한다 — 제목+초록이 벡터 하나다.
 
     그래서 focus는 검색이 아니라 재정렬에만 걸린다. 여기서 무언가 바뀌기 시작하면
     측정되지 않은 것을 하고 있다는 뜻이다.
     """
-    captured = _capture_search(monkeypatch)
+    captured = _capture_search(monkeypatch, nodes)
     nodes.retrieval_node(
         {"query_title": "T", "query_abstract": "A",
          "preferences": SearchPreferences(similarity_focus="evaluation")},
@@ -146,7 +158,7 @@ def test_similarity_focus_does_not_touch_the_search(monkeypatch):
 
 # --------------------------------------------------------- 근거 기록
 
-def test_the_report_records_what_was_actually_applied():
+def test_the_report_records_what_was_actually_applied(nodes):
     """used_llm과 같은 규약 — 설정이 아니라 **이 실행이 쓴 값**을 남긴다.
 
     이게 없으면 "왜 이 5편이 나왔나"를 사후에 가릴 수 없다. 온보딩 테이블을
@@ -160,7 +172,7 @@ def test_the_report_records_what_was_actually_applied():
     assert report.preferences == prefs
 
 
-def test_the_report_records_the_default_when_there_was_no_onboarding():
+def test_the_report_records_the_default_when_there_was_no_onboarding(nodes):
     report = nodes.synthesis_node(
         {"query_title": "Q", "query_abstract": "A", "similar_papers": []},
         embedder=None, llm=None)["report"]
