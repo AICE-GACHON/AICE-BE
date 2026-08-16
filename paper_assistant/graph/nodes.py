@@ -27,12 +27,22 @@ from paper_assistant.llm import (
 from paper_assistant.graph.progress import emit
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.query.revisions import get_body_revision_count
-from paper_assistant.retrieval.hybrid_search import hybrid_search
+from paper_assistant.retrieval.hybrid_search import hybrid_search, ranking_weights
 from paper_assistant.schemas import (
-    PaperSelection, Report, RetrievalConfidence, ReviewDetail, SelectedPaper,
-    SimilarPaper)
+    PaperSelection, Report, RetrievalConfidence, ReviewDetail,
+    SearchPreferences, SelectedPaper, SimilarPaper)
 
 log = logging.getLogger(__name__)
+
+
+def preferences_of(state: PipelineState) -> SearchPreferences:
+    """상태에서 온보딩 선호를 꺼낸다. 없으면 기본값(전부 balanced).
+
+    노드마다 `state.get("preferences") or SearchPreferences()`를 적으면 한 곳이
+    빠졌을 때 그 노드만 조용히 기본값으로 돈다 — 선호가 검색에는 걸리고 재정렬에는
+    안 걸리는 식의 반쪽 적용이 에러 없이 만들어진다.
+    """
+    return state.get("preferences") or SearchPreferences()
 
 
 # ---------------------------------------------------------------- input
@@ -58,12 +68,18 @@ def retrieval_node(state: PipelineState, embedder, llm) -> dict:
 
     top_k를 넘기지 않는다 — 후보 수는 hybrid_search.RERANK_CANDIDATES 하나가 소유한다.
     여기서 숫자를 다시 적으면 상수를 바꿔도 반영되지 않는 자리가 하나 더 생긴다.
+
+    **온보딩의 recency_bias가 걸리는 유일한 지점이다.** 그 답은 연도·인용 백분위로
+    계산되는 값이라 LLM에게 넘길 수 없고(후보 목록에 점수를 싣지 않는다), 반대로
+    similarity_focus(문제/방법/평가)는 여기서 반영할 수 없다 — SPECTER2는 제목과
+    초록을 벡터 하나로 만들어서 세 축을 구분하지 못한다.
     """
     title = state["query_title"]
     abstract = state.get("query_abstract", "")
+    weights = ranking_weights(preferences_of(state).recency_bias)
     emit("retrieval", "비슷한 논문을 찾고 있어요")
     qvec = embedder.encode_one(title, abstract).numpy()
-    results = hybrid_search(qvec, f"{title} {abstract}")
+    results = hybrid_search(qvec, f"{title} {abstract}", weights=weights)
     confidence = confidence_from(results)
 
     # 신뢰도가 weak이면 여기서 바로 알린다. 다음 단계(재정렬)를 통째로 건너뛰게
@@ -122,7 +138,11 @@ _SELECTION_SCHEMA = {
     "additionalProperties": False,
 }
 
-_RERANK_SYSTEM = (
+# 프롬프트는 **한 벌을 조립한다.** 선호별로 통째로 4벌을 두지 않는 이유는, 여기
+# 들어 있는 것이 취향 문구가 아니라 안전장치이기 때문이다 — "지어낸 id는 버려진다",
+# "최대 5편", "0편도 정답이다", "decision을 보지 마라". 4벌로 복붙하면 그중 하나를
+# 고칠 때 네 곳을 고쳐야 하고, 실제로는 한 곳이 빠진 채로 배포된다.
+_RERANK_BASE = (
     "You are given a researcher's paper as a PDF, and a list of candidate papers "
     "retrieved from a corpus of ICLR/NeurIPS submissions. Pick the candidates that "
     "are genuinely most similar to the PDF, ordered most similar first.\n"
@@ -140,12 +160,66 @@ _RERANK_SYSTEM = (
     "What counts as similar: the same research problem, a comparable method or "
     "approach, or the same evaluation setting. Sharing only a dataset or a buzzword "
     "is not enough — a paper that uses the same benchmark for an unrelated task is "
-    "not similar. Papers cited by the PDF are strong evidence of genuine relatedness.\n"
-    "\n"
-    "When two candidates are similar to a comparable degree, prefer the more recent "
-    "one: the user's goal is to see what reviewers said, and recent reviews reflect "
-    "current expectations.\n"
-    "\n"
+    "not similar. Papers cited by the PDF are strong evidence of genuine relatedness."
+)
+
+# 위 문단이 세 축을 OR로 나열한다. 사용자가 그중 하나를 고르면 **그 축의 일치를 더
+# 무겁게 보라**는 문단을 여기서 덧붙인다.
+#
+# ⚠️ 문구가 "그 축만 보라"가 되면 바로 윗 문단의 가드와 충돌한다 — "같은 벤치마크를
+# 다른 과제에 쓴 논문은 유사가 아니다"를 evaluation focus가 뒤집어 버리면, 이 제품이
+# 파는 문장("비슷한 논문들이 이런 지적을 받았다")이 거짓이 된다. 그래서 전부
+# **정렬을 바꾸되 기준선은 그대로**라고 못박는다.
+_FOCUS_RULES = {
+    "problem": (
+        "The user asked to prioritise SHARED RESEARCH PROBLEM. Among the candidates "
+        "that clear the bar above, rank those attacking the same problem — the same "
+        "task, setting, and goal — ahead of those that merely share machinery or a "
+        "benchmark. This changes the ordering and which borderline candidates make "
+        "the cut; it does not lower the bar."),
+    "method": (
+        "The user asked to prioritise SHARED METHOD. Among the candidates that clear "
+        "the bar above, rank those built on a comparable approach — the same family "
+        "of models, training scheme, or algorithmic idea — ahead of those that only "
+        "share the application domain. This changes the ordering and which borderline "
+        "candidates make the cut; it does not lower the bar."),
+    "evaluation": (
+        "The user asked to prioritise SHARED EVALUATION. Among the candidates that "
+        "clear the bar above, rank those whose experimental setup resembles the "
+        "PDF's — the same benchmarks, metrics, ablations, or baselines — ahead of "
+        "those that share only the topic. This changes the ordering and which "
+        "borderline candidates make the cut; **it does not lower the bar** — a paper "
+        "that runs the same benchmark for an unrelated task is still not similar."),
+}
+
+# 동률일 때의 결정 규칙. recency_bias에 따라 갈린다.
+#
+# **이 문장을 선호와 함께 바꾸지 않으면 1단계의 가중치 작업이 무효가 된다.** 후보
+# 순서를 인용도 쪽으로 기울여 놓아도, 마지막 판정자가 "동률이면 최신을 골라라"를
+# 읽고 있으면 그대로 되돌린다.
+#
+# cited에서 "목록 순서를 따르라"고 말할 수 있는 이유는, 후보가 final_score 내림차순
+# 으로 실려 나가기 때문이다 (hybrid_search의 반환 순서). 즉 그 순서 자체가 이미
+# 사용자가 고른 우선순위다. 인용 백분위를 후보 목록에 숫자로 실어 보내지 않는 것은
+# 유사도 점수를 싣지 않는 것과 같은 이유다 (설계서 §20).
+_RECENCY_TIEBREAK = {
+    "balanced": (
+        "When two candidates are similar to a comparable degree, prefer the more "
+        "recent one: the user's goal is to see what reviewers said, and recent "
+        "reviews reflect current expectations."),
+    "recent": (
+        "The user asked for recent work. When two candidates are similar to a "
+        "comparable degree, prefer the more recent one, and resolve genuine ties by "
+        "year: they want reviews that reflect what reviewers expect right now."),
+    "cited": (
+        "The user asked for established, well-cited work rather than the newest. "
+        "When two candidates are similar to a comparable degree, prefer the one "
+        "listed EARLIER in the candidate list — the list is already ordered by that "
+        "preference. Do not use the year as a tie-break here; an older paper is not "
+        "a worse pick for this user."),
+}
+
+_RERANK_TAIL = (
     "Do NOT let a paper's decision (accept/reject) affect your ranking. Rejected "
     "papers carry the most informative reviews for this product.\n"
     "\n"
@@ -160,8 +234,33 @@ _RERANK_SYSTEM = (
 )
 
 
+def rerank_system(preferences: SearchPreferences) -> str:
+    """온보딩 선호를 반영한 재정렬 시스템 프롬프트 한 벌.
+
+    **선호 문자열을 프롬프트에 넣지 않는다 — 키로 상수를 조회할 뿐이다.**
+    이 값의 출처가 무인증 엔드포인트라(schemas.SearchPreferences의 ⚠️) 문자열을
+    그대로 이어 붙이면 프롬프트 인젝션 경로가 열린다. SearchPreferences가 이미
+    화이트리스트로 걸러 주지만, 여기서도 dict 조회로만 쓰는 편이 안전이 한 겹
+    더 남는다 — 나중에 누가 검증을 느슨하게 해도 이 자리는 뚫리지 않는다.
+
+    balanced/balanced(=온보딩을 건너뛴 사용자)면 개편 이전과 **글자 그대로 같은**
+    프롬프트가 나온다. 회귀를 걱정할 필요가 없다는 뜻이다.
+    """
+    focus = _FOCUS_RULES.get(preferences.similarity_focus)
+    tiebreak = (_RECENCY_TIEBREAK.get(preferences.recency_bias)
+                or _RECENCY_TIEBREAK["balanced"])
+    parts = [_RERANK_BASE] + ([focus] if focus else []) + [tiebreak, _RERANK_TAIL]
+    return "\n\n".join(parts)
+
+
 def llm_rerank_node(state: PipelineState, embedder, llm) -> dict:
     """검색 후보 중에서 **정말로 비슷한** 논문을 LLM이 고른다 (개편의 핵심 단계).
+
+    **온보딩의 similarity_focus가 걸리는 유일한 지점이다** (rerank_system 참고).
+    "무엇을 비슷하다고 볼 것인가"를 판단하는 자리가 여기뿐이기 때문이다 — 1단계
+    임베딩은 제목+초록을 벡터 하나로 만들어 문제/방법/평가를 구분하지 못한다.
+    그래서 이 선호의 효과는 **후보 50편 안에서 5편을 고르는 기준**까지다. 후보에
+    평가-유사 논문이 애초에 없으면 프롬프트로 만들어낼 수 없다.
 
     돌리지 않는 경우가 둘이다:
       - llm이 없다(예산 off) → 검색 상위 5편으로 결정론적 스텁.
@@ -196,7 +295,7 @@ def llm_rerank_node(state: PipelineState, embedder, llm) -> dict:
                    "abstract": (p.abstract or "")[:1500],
                    "venue": p.venue, "year": p.year} for p in papers]
     raw = llm.structured_with_pdf(
-        SONNET, _RERANK_SYSTEM, pdf_bytes,
+        SONNET, rerank_system(preferences_of(state)), pdf_bytes,
         json.dumps({"candidates": candidates}, ensure_ascii=False),
         _SELECTION_SCHEMA, max_tokens=RERANK_MAX_TOKENS,
         output_config={"effort": RERANK_EFFORT})
@@ -416,6 +515,10 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         evidence=evidence_pool,
         citations=citations,
         summary_markdown=summary,
+        # 이 실행이 **실제로 쓴** 선호를 리포트에 박는다 (used_llm과 같은 규약).
+        # 온보딩 테이블을 나중에 다시 읽으면 안 된다 — 사용자가 마이페이지에서 답을
+        # 바꾸는 순간 지난 분석의 기록이 소급해서 거짓이 된다.
+        preferences=preferences_of(state),
     )
     emit("synthesis", "정리를 마쳤어요", done=True)
     return {"report": report}

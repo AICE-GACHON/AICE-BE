@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:   # 런타임에는 임포트하지 않는다 (torch 로드 회피)
     from paper_assistant.schemas import (
         PaperDetail, PaperListResponse, PaperRevisions, PaperStory,
-        ProgressEvent, Report, ReviewDetail)
+        ProgressEvent, Report, ReviewDetail, SearchPreferences)
 
 __all__ = [
     "analyze",
@@ -49,7 +49,8 @@ __all__ = [
 
 def analyze(title: str, abstract: str = "", pdf_bytes: bytes | None = None,
             use_llm: bool | None = None,
-            on_event: "Callable[[ProgressEvent], None] | None" = None) -> "Report":
+            on_event: "Callable[[ProgressEvent], None] | None" = None,
+            preferences: "SearchPreferences | None" = None) -> "Report":
     """논문 초안 하나를 분석해 종합 Report를 만든다.
 
     use_llm=None이면 설정값(PAPER_ASSISTANT_USE_LLM)을 따른다. 첫 호출은 SPECTER2
@@ -61,12 +62,22 @@ def analyze(title: str, abstract: str = "", pdf_bytes: bytes | None = None,
 
         analyze(title, abstract, pdf_bytes=b, on_event=lambda ev: print(ev.label))
 
+    preferences(schemas.SearchPreferences)는 온보딩 2단계 답변이다 — "무엇이
+    비슷하면 더 눈여겨볼까"(similarity_focus)와 "최신 vs 인용"(recency_bias).
+    None이면 전부 balanced로 돌아 이 인자가 생기기 전과 동일하다. 적용된 값은
+    반환된 Report.preferences에 그대로 남으므로, **호출자는 그것을 저장해야
+    한다** — 온보딩 테이블은 나중에 바뀔 수 있고, 그러면 지난 분석을 설명할
+    근거가 사라진다 (used_llm과 같은 규약).
+
+        analyze(title, abstract, preferences=SearchPreferences(
+            similarity_focus="evaluation", recency_bias="cited"))
+
     ⚠️ on_event는 **분석 스레드에서 동기로** 불린다. 느린 일(네트워크 등)을 여기서
     하면 그만큼 분석이 늦어진다. 예외를 내도 분석은 계속된다.
     """
     from paper_assistant.graph.pipeline import analyze as _fn
     return _fn(title, abstract, pdf_bytes=pdf_bytes, use_llm=use_llm,
-               on_event=on_event)
+               on_event=on_event, preferences=preferences)
 
 
 def warmup(use_llm: bool | None = None) -> None:
