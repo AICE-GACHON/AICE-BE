@@ -20,8 +20,10 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.analysis import AnalysisResponse, AnalysisStartResponse
 from app.schemas.common import ApiResponse
+from app.schemas.share import ShareLinkResponse
 from app.schemas.submission import (
     SimilarPaperMatchResponse, SubmissionResponse, SubmissionSummary)
+from app.services import shares as share_service
 from app.services import submissions as submission_service
 from app.services.analysis import (
     expire_stale, latest_prediction, matches_for, run_analysis, start_prediction)
@@ -168,3 +170,41 @@ def get_analysis(
     data.matches = [SimilarPaperMatchResponse.model_validate(m)
                     for m in matches_for(db, prediction.prediction_id)]
     return ApiResponse[AnalysisResponse](data=data)
+
+
+# -------------------------------------------------------------------- 공유
+
+@router.post("/{submission_id}/share", response_model=ApiResponse[ShareLinkResponse])
+def create_share_link(
+    submission_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """공개 공유 링크를 발급한다 (이미 있으면 그것을 돌려준다).
+
+    발급된 토큰을 아는 사람은 **로그인 없이** 분석 결과를 봅니다 — 이 호출이 곧
+    공개 결정이므로 소유자만 부를 수 있고, 분석이 끝난 뒤에만 가능합니다.
+
+    201이 아니라 200인 이유: 두 번째 호출부터는 아무것도 만들지 않고 기존 링크를
+    그대로 돌려주기 때문입니다(멱등). 새 링크를 원하면 DELETE 후 다시 부르세요.
+    """
+    submission = submission_service.owned_submission(db, submission_id, current_user)
+    share = share_service.issue(db, submission)
+    return ApiResponse[ShareLinkResponse](data=ShareLinkResponse(
+        token=share.token, url=share_service.share_url(share.token)))
+
+
+@router.delete("/{submission_id}/share", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_share_link(
+    submission_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """공유를 폐기한다. 그 뒤로 해당 토큰은 404가 됩니다.
+
+    폐기할 공유가 없어도 204입니다 — 폐기는 멱등해야 하고, "이미 폐기됨"과 "방금
+    폐기함"을 구분해 봐야 화면이 할 일이 같습니다.
+    """
+    submission_service.owned_submission(db, submission_id, current_user)
+    share_service.revoke(db, submission_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

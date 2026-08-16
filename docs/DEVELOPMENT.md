@@ -274,6 +274,9 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 | Submission | `DELETE /api/submissions/{id}` | 초안 삭제 (분석 결과도 함께) → **204** | 필요 |
 | Submission | `POST /api/submissions/{id}/analysis` | 분석 시작 → **202**, status=pending | 필요 |
 | Submission | `GET /api/submissions/{id}/analysis` | 분석 상태/결과 조회 (폴링) | 필요 |
+| Share | `POST /api/submissions/{id}/share` | 공개 공유 링크 발급 → `{token, url}`. **이미 있으면 그것을 반환**(멱등, 200). 분석이 `done`이 아니면 **409** | 필요 |
+| Share | `DELETE /api/submissions/{id}/share` | 공유 폐기 → **204**. 폐기할 것이 없어도 204 (멱등) | 필요 |
+| Share | `GET /api/shared/{token}` | **비로그인 공개 조회.** 없는·폐기된 토큰은 전부 **404**(사유를 구분하지 않음). IP 기준 **300회/시간** | **불필요** |
 | Corpus | `GET /api/papers` | 코퍼스 논문 목록 (venue/year/field/q 필터, limit/offset 페이지네이션) | - |
 | Corpus | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Corpus | `GET /api/papers/{paper_id}/reviews` | 그 논문의 리뷰 목록 | - |
@@ -283,6 +286,14 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
 `similar_papers[].paper_id`를 그대로 넘기면 됩니다.
+
+⚠️ `GET /api/shared/{token}`은 **이 서비스에서 유일하게 인증이 없는 조회 경로**입니다.
+응답(`SharedAnalysisResponse`)은 `title`·`abstract`·`field`·`report` 넷뿐이고,
+`user_id`·이메일·`pdf_bytes`·`submission_id`는 의도적으로 빠져 있습니다. 필드를
+추가하는 것은 곧 인터넷 전체에 공개하는 것이므로, 늘리기 전에
+`app/schemas/share.py`의 docstring을 먼저 읽으세요. `url`은 서버가
+`FRONTEND_BASE_URL`로 조립하므로 **프론트가 다시 만들지 마세요** — 규칙이 두 곳에
+생기면 한쪽만 바뀌었을 때 이미 나간 링크가 깨집니다.
 
 남의 초안에 접근하면 403이 아니라 **404**입니다 — 존재 여부 자체를 알리지 않습니다.
 

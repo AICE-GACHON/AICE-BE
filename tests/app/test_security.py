@@ -224,13 +224,35 @@ def _prod(**overrides) -> dict:
 
     **SMTP를 명시적으로 비운다.** `_env_file=None`만으로는 주변 환경이 새어 들어와,
     개발자 `.env`에 진짜 SES 자격증명이 들어 있으면(배포를 만지면 실제로 그렇게 된다)
-    "메일을 켰는데 FRONTEND_BASE_URL이 개발용" 가드에 걸려 **이 파일의 테스트들이
-    엉뚱한 이유로 실패한다.** 여기서 보려는 것은 초대 게이트·docs 노출이지 메일이
-    아니므로, 메일은 꺼진 상태로 고정한다. 메일 가드 자체는 test_mail.py가 본다.
+    SMTP 반쪽 설정 가드에 걸려 **이 파일의 테스트들이 엉뚱한 이유로 실패한다.**
+    여기서 보려는 것은 초대 게이트·docs 노출이지 메일이 아니므로, 메일은 꺼진
+    상태로 고정한다. 메일 가드 자체는 test_mail.py가 본다.
+
+    **FRONTEND_BASE_URL도 채운다.** 기본값이 localhost인데 production에서는
+    메일 설정과 무관하게 거부된다(공유 링크가 이 값으로 만들어지기 때문). 그
+    가드 자체는 아래 test_production_refuses_dev_frontend_url이 본다.
     """
-    return dict(_env_file=None, JWT_SECRET_KEY=STRONG_SECRET, ENVIRONMENT="production",
+    base = dict(_env_file=None, JWT_SECRET_KEY=STRONG_SECRET, ENVIRONMENT="production",
                 CORS_ORIGINS=["https://a.com"], ALLOWED_HOSTS=["a.com"],
-                SMTP_HOST="", SMTP_USER="", SMTP_PASSWORD="", SMTP_FROM="", **overrides)
+                FRONTEND_BASE_URL="https://a.com",
+                SMTP_HOST="", SMTP_USER="", SMTP_PASSWORD="", SMTP_FROM="")
+    return {**base, **overrides}
+
+
+def test_production_refuses_dev_frontend_url():
+    """**메일을 켜지 않았어도** 거부한다.
+
+    예전에는 이 검사가 SMTP 블록 안에만 있었다. 그때는 이 값을 쓰는 곳이 재설정
+    메일뿐이었기 때문인데, 지금은 공유 링크(app/services/shares.py)도 같은 값으로
+    주소를 만든다 — 메일 없이 배포하면 사용자가 발급한 공유 링크가 전부
+    `http://localhost:5173/shared/...`로 나가고, 받는 사람은 자기 컴퓨터를 연다.
+    실패가 **남의 브라우저에서** 일어나 우리 로그에는 아무것도 남지 않는다.
+    """
+    for bad in ("http://localhost:5173", "http://127.0.0.1:3000", "http://a.com"):
+        with pytest.raises(ValidationError):
+            Settings(**_prod(FRONTEND_BASE_URL=bad))
+
+    assert Settings(**_prod(FRONTEND_BASE_URL="https://a.com")).FRONTEND_BASE_URL
 
 
 def test_production_refuses_llm_with_open_signup(use_llm):
