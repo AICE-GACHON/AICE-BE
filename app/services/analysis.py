@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models.analysis import IN_PROGRESS, ReviewPrediction, SimilarPaperMatch
+from app.models.onboarding import OnboardingProfile
 from app.models.submission import Submission
 
 log = logging.getLogger(__name__)
@@ -170,6 +171,39 @@ def _progress_recorder(prediction_id: uuid.UUID):
 # ------------------------------------------------------------------ 실제 실행
 
 
+def _preferences_for(db: Session, user_id: uuid.UUID):
+    """이 사용자의 온보딩 답변 → analyze()에 넘길 검색 선호.
+
+    온보딩 행이 없을 수 있다. 초대 코드로 바로 가입했거나, 온보딩을 건너뛰었거나,
+    익명으로 만든 onboarding_id가 회원가입 요청에 실려 오지 않아 user_id가 끝내
+    채워지지 않은 경우다(app/models/onboarding.py). **없으면 기본값이고, 그게 곧
+    "균형있게"다** — 프론트 기본값과 같은 뜻이라 별도 처리가 필요 없다.
+
+    ⚠️ **DB 값을 그대로 신뢰하지 않는다.** POST /api/onboarding은 인증이 없고
+    컬럼은 자유 문자열 String(50)이라 무엇이든 들어올 수 있다. 화이트리스트 검사는
+    SearchPreferences가 한다 — 여기서는 읽어서 넘기기만 한다.
+
+    조회 실패로 분석을 죽이지 않는다. 선호는 분석의 곁가지고, 못 읽으면 기본값으로
+    도는 것이 정답이다 — 이걸 못 읽어서 분석 전체가 실패하면 앞뒤가 바뀐 것이다.
+    """
+    from paper_assistant.schemas import SearchPreferences
+
+    try:
+        profile = db.scalars(
+            select(OnboardingProfile)
+            .where(OnboardingProfile.user_id == user_id)
+        ).first()
+    except Exception:
+        log.warning("온보딩 선호 조회 실패 (user_id=%s) — 기본값으로 분석합니다",
+                    user_id, exc_info=True)
+        return SearchPreferences()
+
+    if profile is None:
+        return SearchPreferences()
+    return SearchPreferences(similarity_focus=profile.similarity_focus,
+                             recency_bias=profile.recency_bias)
+
+
 def run_analysis(prediction_id: uuid.UUID) -> None:
     """백그라운드에서 실행되는 분석 1회분.
 
@@ -191,6 +225,11 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
         prediction.status = "running"
         db.commit()
 
+        # 온보딩 선호는 **분석을 시작하는 이 시점의 값**으로 고정된다. 사용자가
+        # 분석이 도는 동안 마이페이지에서 답을 바꿔도 이번 결과는 흔들리지 않고,
+        # 무엇을 적용했는지는 report.preferences에 남는다.
+        preferences = _preferences_for(db, submission.user_id)
+
         try:
             # 지연 import — torch/SPECTER2를 서버 기동이 아니라 첫 분석 때 로드한다.
             # use_llm은 넘기지 않는다: 설정은 paper_assistant.config 하나가 소유하고,
@@ -205,7 +244,8 @@ def run_analysis(prediction_id: uuid.UUID) -> None:
             # 실어 나른다. 여기서 예외가 나도 분석은 계속된다(analyze가 삼킨다).
             report = analyze(title=submission.title, abstract=submission.abstract,
                              pdf_bytes=submission.pdf_bytes,
-                             on_event=_progress_recorder(prediction_id))
+                             on_event=_progress_recorder(prediction_id),
+                             preferences=preferences)
         except Exception:
             # 분석 실패는 서버 장애가 아니라 이 작업의 상태다. 사용자가 폴링으로
             # 확인할 수 있도록 failed로 기록하고 예외를 삼킨다.

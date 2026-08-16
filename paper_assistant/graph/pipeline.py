@@ -23,7 +23,7 @@ from paper_assistant.embedding.specter2 import Specter2Embedder
 from paper_assistant.graph import nodes, progress
 from paper_assistant.llm import get_llm
 from paper_assistant.graph.state import PipelineState
-from paper_assistant.schemas import ProgressEvent, Report
+from paper_assistant.schemas import ProgressEvent, Report, SearchPreferences
 
 log = logging.getLogger(__name__)
 
@@ -84,11 +84,17 @@ def warmup(use_llm: bool | None = None) -> None:
 
 def analyze(title: str, abstract: str = "", pdf_bytes: bytes | None = None,
             use_llm: bool | None = None,
-            on_event: Callable[[ProgressEvent], None] | None = None) -> Report:
+            on_event: Callable[[ProgressEvent], None] | None = None,
+            preferences: SearchPreferences | None = None) -> Report:
     """공개 진입점 — 백엔드 통합 계약.
 
     title/abstract(또는 pdf_bytes)를 받아 종합 Report를 반환한다.
     use_llm=None이면 설정값 PAPER_ASSISTANT_USE_LLM으로 결정 (기본 off = $0).
+
+    preferences는 온보딩 2단계 답변이다. None이면 기본값(전부 balanced)이라 이
+    인자가 생기기 전과 정확히 같게 돈다. **호출마다 상태로 흐르며, 컴파일된
+    그래프에는 절대 묶이지 않는다** — 그래프는 use_llm만 키로 쓰는 전역 캐시에
+    들어 있어서(_graphs), 여기 묶으면 첫 사용자의 선호가 이후 모든 분석에 적용된다.
 
     on_event를 주면 단계가 바뀔 때마다 ProgressEvent로 알려준다 (없으면 조용히
     돈다). 분석은 수십 초~수 분이 걸리는데 그 사이 호출자가 아는 것이 "돌고 있다"
@@ -127,7 +133,8 @@ def analyze(title: str, abstract: str = "", pdf_bytes: bytes | None = None,
     final: dict | None = None
     for mode, chunk in graph.stream(
             {"query_title": title, "query_abstract": abstract,
-             "pdf_bytes": pdf_bytes},
+             "pdf_bytes": pdf_bytes,
+             "preferences": preferences or SearchPreferences()},
             stream_mode=["custom", "values"]):
         if mode == "custom":
             notify(chunk)

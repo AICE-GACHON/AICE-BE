@@ -88,6 +88,11 @@ def _ef_search_for(limit: int) -> int:
 
 # ------------------------------------------------------------ 랭킹 가중치
 # 합이 1.0이라 각 값이 곧 지분 비율이다. 최신성 > 유사도가 요구사항의 핵심.
+#
+# **이 셋은 기본 프리셋(balanced)의 값이다.** 사용자가 온보딩에서 "최신 트렌드"나
+# "검증된(인용 많은) 논문"을 고르면 RANKING_PRESETS의 다른 조합이 쓰인다. 여기를
+# 상수로 남겨 둔 이유는 balanced가 여전히 **기준선**이기 때문이다 — 온보딩을
+# 건너뛴 사용자, 옛 분석, 그리고 튜닝 실험이 전부 이 값을 본다.
 W_SIMILARITY = 0.35
 W_RECENCY = 0.45
 W_CITATION = 0.20
@@ -115,6 +120,75 @@ RECENCY_HALF_LIFE = 3.0
 # 닿지 않았다"는 뜻이라(코퍼스의 30.5%) 상도 벌도 주지 않는다. 0으로 채우면 결측률이
 # 가장 높은 축인 2025년(58.0%)이 하필 손해를 봐서 최신성 요구와 어긋난다.
 NEUTRAL_CITATION_PERCENTILE = 0.5
+
+
+# --------------------------------------------------- 사용자 선호별 랭킹 프리셋
+
+@dataclass(frozen=True)
+class RankingWeights:
+    """재정렬 한 벌 — 가중치 3개 **와 반감기**.
+
+    반감기를 같이 묶는 이유는, 이 넷이 따로 움직일 수 있는 값이 아니기 때문이다.
+    "인용 많은 논문을 우선하라"를 가중치만으로 구현하면 거의 아무 일도 일어나지
+    않는다: citation_percentile은 **같은 연도 안**의 백분위인데, 기본 설정에서는
+    결과의 88%가 2025년이고 2025년은 인용 결측률이 58.0%라 그 절반이 중립값
+    0.5로 서로 같기 때문이다. 인용도가 실제로 순위를 가르려면 **연도가 퍼져야**
+    하고, 연도를 퍼뜨리는 손잡이는 가중치가 아니라 반감기다.
+    """
+    similarity: float
+    recency: float
+    citation: float
+    half_life: float
+
+
+def balanced_weights() -> RankingWeights:
+    """기본 프리셋. **모듈 상수를 호출 시점에 읽는다.**
+
+    상수를 dict에 미리 박아 두면 recency_score가 피한 것과 똑같은 함정에 빠진다 —
+    모듈이 로드될 때 값이 한 번 복사되어, 튜닝 실험이 W_*나 RECENCY_HALF_LIFE를
+    바꿔도 조용히 옛 값으로 계산된다.
+    """
+    return RankingWeights(W_SIMILARITY, W_RECENCY, W_CITATION, RECENCY_HALF_LIFE)
+
+
+# 온보딩 "최신 논문과 인용이 많은 논문, 뭘 우선할까요?"의 답 → 랭킹 한 벌.
+#
+# ⚠️ **어떤 프리셋도 "최신성 > 유사도"를 깨서는 안 된다.** 그건 사용자 선호보다
+# 상위에 있는 요구사항이고(docs/랭킹_가중치_설계.md §1, 교수님 피드백), 그래서
+# cited 프리셋조차 recency > similarity를 유지한다. 인용도에 줄 0.05는 최신성이
+# 아니라 **유사도에서** 가져왔다 — 최신성에서 빼면 요구사항이 즉시 깨진다
+# (0.35/0.40/0.25 · 4년의 여유는 -0.052다).
+#
+# 근거는 docs/랭킹_가중치_설계.md §11.7의 조합 탐색이다. 거기서 확인된 것은
+# "F1로는 어떤 조합도 서로 구분되지 않는다(전부 0.470~0.485, 표준오차 0.015)"와
+# "조합이 실제로 바꾸는 것은 정확도가 아니라 **연도 분포**"였다. 그래서 프리셋의
+# 약속도 정확도가 아니라 분포다:
+#
+#   balanced 0.35/0.45/0.20 · 3년 → 2025년 88.0%  (§11.7 ★ 실측)
+#   recent   0.30/0.50/0.20 · 2년 → 2025년 93%+   (양 축 모두 최신 쪽. 실측된 두
+#            점(0.35/0.45/0.20·2년 F1 0.485, 0.30/0.50/0.20·3년 F1 0.481) 사이라
+#            F1은 그 구간으로 본다. 요구사항 여유는 계산으로 확인된다 — 아래 테스트)
+#   cited    0.30/0.45/0.25 · 4년 → 2025년 82%대  (가중치 조합은 §11.7 실측
+#            F1 0.478, 반감기 4년도 §11.7 실측. 둘을 겹친 것은 이번이 처음이다)
+#
+# 프리셋을 늘리거나 숫자를 고치면 tests/paper_assistant/test_retrieval.py의
+# test_no_preset_breaks_the_recency_requirement 가 자동으로 따라온다 — 그 테스트가
+# 이 딕셔너리를 그대로 읽는다.
+_TUNED_PRESETS = {
+    "recent": RankingWeights(0.30, 0.50, 0.20, 2.0),
+    "cited": RankingWeights(0.30, 0.45, 0.25, 4.0),
+}
+
+PRESET_NAMES = ("balanced", "recent", "cited")
+
+
+def ranking_weights(recency_bias: str | None = None) -> RankingWeights:
+    """온보딩 답(recency_bias) → 랭킹 한 벌. 모르는 값이면 기본 프리셋.
+
+    문자열을 **키 조회로만** 쓴다 — 이 값의 출처가 무인증 엔드포인트라
+    (schemas.SearchPreferences의 ⚠️ 참고) 계산식에 흘려 넣을 수 없다.
+    """
+    return _TUNED_PRESETS.get(recency_bias) or balanced_weights()
 
 
 @dataclass
@@ -258,11 +332,17 @@ def recency_score(year: int, max_year: int,
     return 0.5 ** (age / half_life)
 
 
-def weighted_score(similarity: float, recency: float, citation: float) -> float:
-    """세 요소의 가중합. 각 인자는 [0,1]로 정규화된 상태여야 한다."""
-    return (W_SIMILARITY * similarity
-            + W_RECENCY * recency
-            + W_CITATION * citation)
+def weighted_score(similarity: float, recency: float, citation: float,
+                   weights: RankingWeights | None = None) -> float:
+    """세 요소의 가중합. 각 인자는 [0,1]로 정규화된 상태여야 한다.
+
+    weights=None이면 기본 프리셋 — 그것도 **호출 시점에** 읽는다
+    (balanced_weights 주석 참고).
+    """
+    w = weights or balanced_weights()
+    return (w.similarity * similarity
+            + w.recency * recency
+            + w.citation * citation)
 
 
 @dataclass
@@ -277,26 +357,29 @@ class RankingSignals:
 def rerank(rrf_scores: dict[int, float],
            ranking_fields: dict[int, tuple[int, float | None]],
            max_year: int,
-           n_retrievers: int = 2) -> dict[int, RankingSignals]:
+           n_retrievers: int = 2,
+           weights: RankingWeights | None = None) -> dict[int, RankingSignals]:
     """RRF 점수 + 메타데이터를 가중합으로 재정렬한다.
 
     rrf_scores    : {paper_id: RRF 점수}
     ranking_fields: {paper_id: (year, citation_percentile 또는 None)}
     max_year      : 코퍼스의 최신 연도 (최신성 계산 기준점)
+    weights       : 사용자 선호 프리셋. None이면 기본(balanced).
 
     ranking_fields에 없는 논문은 중립값으로 처리한다 — 조회 사이에 사라진 경우라
     어차피 메타데이터 조회에서 탈락한다. 여기서 예외를 내면 검색 전체가 죽는다.
     """
+    w = weights or balanced_weights()
     denom = max_rrf(n_retrievers)
     signals: dict[int, RankingSignals] = {}
     for pid, rrf in rrf_scores.items():
         year, percentile = ranking_fields.get(pid, (max_year, None))
         similarity = min(rrf / denom, 1.0)
-        recency = recency_score(year, max_year)
+        recency = recency_score(year, max_year, w.half_life)
         citation = (NEUTRAL_CITATION_PERCENTILE if percentile is None
                     else float(percentile))
         signals[pid] = RankingSignals(
-            final=weighted_score(similarity, recency, citation),
+            final=weighted_score(similarity, recency, citation, w),
             similarity=similarity, recency=recency, citation=citation)
     return signals
 
@@ -392,13 +475,18 @@ def _fetch_metadata(cur, paper_ids: list[int]) -> dict[int, tuple]:
 
 
 def hybrid_search(embedding, query_text: str, top_k: int | None = None,
-                  pool: int | None = None) -> list[SearchResult]:
+                  pool: int | None = None,
+                  weights: RankingWeights | None = None) -> list[SearchResult]:
     """벡터·full-text를 RRF로 결합하고 가중합으로 재정렬해 상위 top_k편 반환.
 
     embedding: SPECTER2로 인코딩한 쿼리 벡터 (L2 정규화된 numpy/list)
     query_text: full-text 검색에 쓸 원문 (보통 제목 + 초록)
     top_k: 반환할 후보 수. None이면 RERANK_CANDIDATES (LLM 재정렬에 넘길 수).
     pool: 각 검색기에서 가져올 후보 수. None이면 CANDIDATE_POOL.
+    weights: 사용자 선호 랭킹 프리셋. None이면 기본(balanced) — 즉 온보딩을
+        건너뛴 사용자와 옛 호출자는 이 인자가 생기기 전과 정확히 같게 돈다.
+        **검색 자체(두 검색기·RRF)는 프리셋과 무관하다** — 프리셋은 이미 뽑힌
+        후보를 어떤 순서로 넘길지만 바꾼다.
 
     **리뷰가 있는 논문만 반환한다** (_HAS_REVIEWS 참고).
 
@@ -427,7 +515,7 @@ def hybrid_search(embedding, query_text: str, top_k: int | None = None,
         # 재정렬은 후보 **전체**를 대상으로 해야 의미가 있다. top_k로 자른 뒤에
         # 재정렬하면 최신 논문이 잘려나간 뒤라 끌어올릴 대상 자체가 없다.
         ranking_fields, dedupe, max_year = _fetch_ranking_fields(cur, list(scores))
-        signals = rerank(scores, ranking_fields, max_year)
+        signals = rerank(scores, ranking_fields, max_year, weights=weights)
 
         # 자르기 **전에** 중복을 접는다. 자른 뒤에 접으면 사라진 자리만큼 후보가
         # 줄어들어, 요청한 50편이 아니라 48편이 조용히 나간다.

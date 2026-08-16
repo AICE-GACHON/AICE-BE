@@ -9,6 +9,8 @@ Create Date: 2026-08-16
 검색 로직(hybrid_search.py·_RERANK_SYSTEM)에 반영하지 않는다 — 지금은 저장만
 한다. similarity_focus·recency_bias 둘 다 nullable이다: 값이 없다는 것 자체가
 "균형있게"(프론트 기본값)와 같은 뜻이라, 별도 sentinel이 필요 없다.
+(2026-08-17 후일담: 그 뒤 실제로 반영됐다 — docs/랭킹_가중치_설계.md §14. 스키마는
+그대로이므로 이 마이그레이션은 바뀌지 않는다.)
 
 venue도 프론트가 이미 다중 선택으로 바꿔뒀는데(개수 제한 없음) 여기가 아직
 문자열 하나만 받고 있었다. purposes/fields/result_order와 같은 JSONB 리스트로
