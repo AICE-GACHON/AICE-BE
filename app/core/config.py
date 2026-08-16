@@ -232,6 +232,20 @@ class Settings(BaseSettings):
                 "가입이 열려 있어 누구나 계정을 만들어 분석(1회 약 $0.30)을 돌릴 수 "
                 "있습니다. 초대 코드를 정하거나, LLM을 끄고 배포하세요.")
 
+        # FRONTEND_BASE_URL은 **메일과 무관하게** 검사한다. 예전에는 아래 SMTP 블록
+        # 안에서만 봤는데, 그때는 이 값을 쓰는 곳이 재설정 메일뿐이었기 때문이다.
+        # 지금은 공유 링크(app/services/shares.py)도 이 값으로 주소를 만든다 —
+        # 메일을 안 켠 배포에서 이 값이 localhost로 남아 있으면, 사용자가 발급한
+        # 공유 링크가 전부 http://localhost:5173/shared/... 로 나간다. 받는 사람은
+        # 자기 컴퓨터를 열게 되고, 실패가 서버가 아니라 **남의 브라우저에서** 일어나
+        # 우리 쪽 로그에는 아무것도 남지 않는다.
+        base = self.FRONTEND_BASE_URL
+        if "localhost" in base or "127.0.0.1" in base or base.startswith("http://"):
+            problems.append(
+                f"FRONTEND_BASE_URL이 개발용입니다: {base!r}. 비밀번호 재설정 메일과 "
+                "공유 링크가 이 값으로 만들어져 나가므로 받는 사람은 열 수 없습니다 "
+                "— 실제 프론트 도메인(https://)으로 바꾸세요.")
+
         # 메일은 **없다고 기동을 막지 않는다.** 위 항목들은 틀리면 공개되거나(CORS,
         # ALLOWED_HOSTS) 청구되는(초대 코드) 종류지만, SMTP가 비어 있는 것은 기능
         # 하나가 꺼진 상태일 뿐이고 이미 시끄럽게 실패한다 — production이면
@@ -241,8 +255,8 @@ class Settings(BaseSettings):
         # 대신 **절반만 채운 설정**은 막는다. 이쪽이 진짜 조용한 실패다:
         #   - SMTP_FROM을 MAIL_FROM으로 잘못 쓰면(extra="ignore") 무시되고 빈 채로
         #     남아, 다 설정한 줄 알았는데 발송 조건이 불성립이라 전부 503이 된다.
-        #   - FRONTEND_BASE_URL이 localhost로 남으면 메일은 정상 발송되는데
-        #     **링크가 전부 깨진 채로 나간다.** 이미 나간 메일은 주워 담을 수 없다.
+        #   - SMTP_USER만 채우고 SMTP_PASSWORD를 빼면, 발송 실패가 삼켜져서
+        #     사용자에게는 200이 나가는데 메일은 오지 않는다.
         mail_values = [self.SMTP_HOST, self.SMTP_USER, self.SMTP_PASSWORD, self.SMTP_FROM]
         if any(v.strip() for v in mail_values):
             missing = [name for name, value in
@@ -259,11 +273,8 @@ class Settings(BaseSettings):
                     "SMTP_USER는 있는데 SMTP_PASSWORD가 비어 있습니다. 인증에 실패하면 "
                     "발송 예외는 삼켜지고(계정 존재 여부를 숨기려는 설계) 사용자에게는 "
                     "200이 나갑니다 — 메일은 오지 않는데 성공으로 보입니다.")
-            base = self.FRONTEND_BASE_URL
-            if "localhost" in base or "127.0.0.1" in base or base.startswith("http://"):
-                problems.append(
-                    f"메일을 켰는데 FRONTEND_BASE_URL이 개발용입니다: {base!r}. "
-                    "재설정 링크가 이 값으로 만들어져 나가므로 받는 사람은 열 수 없습니다.")
+            # FRONTEND_BASE_URL 검사는 **이 블록 밖으로 옮겼다.** 공유 링크도 같은
+            # 값을 쓰게 되면서 메일 설정 여부와 무관한 조건이 됐다 (위쪽 참고).
 
         if problems:
             raise ValueError(
