@@ -9,7 +9,8 @@
 선호가 노드에 닿지 않으면 에러 없이 그냥 기본값으로 돌고, 화면에는 온보딩을
 반영한 것과 구분되지 않는 결과가 뜬다.
 """
-import numpy as np
+from array import array
+
 import pytest
 
 from paper_assistant.graph import nodes
@@ -77,14 +78,24 @@ def test_one_bad_field_does_not_drag_the_other_down():
 # ------------------------------------------------- 검색 노드까지의 배선
 
 class _FakeEmbedder:
-    """encode_one(...).numpy() 만 흉내낸다 (SPECTER2 로드 회피)."""
+    """encode_one(...).numpy() 만 흉내낸다 (SPECTER2 로드 회피).
+
+    벡터는 numpy 배열이 아니라 **표준 라이브러리 array**다. 이 파일은 DB·LLM·모델
+    없이 배선만 보는 테스트인데, numpy를 쓰면 CI의 '빠른 검사'(torch·numpy를 안
+    까는 잡)에서 수집 단계부터 죽는다.
+
+    맨 리스트로는 부족하다 — retrieval_node가 벡터에 대고 하는 일이 .tolist()
+    하나인데(nodes.py), 리스트에는 그 메서드가 없다. array는 그걸 갖고 있고,
+    hybrid_search는 이 파일에서 monkeypatch로 갈아끼워지므로 벡터에 산술이
+    일어나는 곳은 없다.
+    """
 
     @staticmethod
     def encode_one(title, abstract):
         class _Vec:
             @staticmethod
             def numpy():
-                return np.zeros(3, dtype="float32")
+                return array("f", [0.0, 0.0, 0.0])
         return _Vec()
 
 
