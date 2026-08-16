@@ -100,6 +100,16 @@ class SelectedPaper(BaseModel):
     rating_spread: float | None = Field(
         default=None, description="최고-최저 점수 차. 크면 리뷰어 의견이 갈렸다는 뜻")
 
+    # --- 리뷰를 받고 얼마나 고쳤는가 ---
+    revision_count: int | None = Field(
+        default=None,
+        description="저자가 **본문 PDF를 교체한 횟수**. 리비전 총 개수가 아니다 — "
+                    "제목·초록만 고친 edit은 세지 않는다(query/revisions.py의 "
+                    "count_body_revisions). **None과 0은 다른 값이다**: None은 "
+                    "'볼 수 없다'(2023년 이전 학회는 수정 이력이 비공개, 조회 실패 "
+                    "포함), 0은 '확인해 보니 본문을 안 고쳤다'. 화면이 이 둘을 "
+                    "'—'와 '없음'으로 다르게 그리므로 0으로 뭉개면 안 된다")
+
 
 class PaperSelection(BaseModel):
     """LLM이 후보 중에서 고른 논문 1편과 그 이유 (2단계 재정렬의 원출력).

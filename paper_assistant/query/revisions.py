@@ -296,6 +296,34 @@ def get_paper_revisions(paper_id: int) -> PaperRevisions | None:
     return out
 
 
+# --- 본문 수정 횟수 — 결과 표(SelectedPaper.revision_count)가 쓰는 요약값 -------
+#
+# ⚠️ len(revisions)를 세면 안 된다. build_revisions는 edit을 전부 담으므로
+# 제목·초록만 고친 edit도 리비전 한 건으로 잡히는데, 화면이 묻는 것은 "본문을 몇
+# 번 고쳤나"다. pdf FieldChange가 달린 리비전만 세야 그 질문에 답이 된다.
+# baseline(최초 제출)은 changes가 비어 있어 자연히 빠진다 — 제출은 수정이 아니다.
+
+
+def count_body_revisions(revisions: list[RevisionEntry]) -> int:
+    """리비전 목록에서 본문 PDF가 실제로 교체된 건수. 네트워크·DB를 안 탄다."""
+    return sum(1 for r in revisions
+               if any(c.field == "pdf" for c in r.changes))
+
+
+def get_body_revision_count(paper_id: int) -> int | None:
+    """본문 PDF 교체 횟수. get_paper_revisions와 같은 비용(HTTP 1회)이고 PDF는 안 받는다.
+
+    **None과 0은 다른 사실이다.** None은 "볼 수 없다" — 2023년 이전 학회는 구
+    API라 저자가 고친 PDF가 외부에 안 열리고, 조회 실패나 이력 비공개도 여기 든다.
+    0은 "이력은 봤는데 본문은 안 고쳤다"로 확인된 사실이다. 화면도 이 둘을 다르게
+    쓴다(— / 없음).
+    """
+    revisions = get_paper_revisions(paper_id)
+    if revisions is None or not revisions.supported or not revisions.revisions:
+        return None
+    return count_body_revisions(revisions.revisions)
+
+
 # --- 본문(PDF 전체) diff — get_paper_revisions와 분리된 opt-in 확장 ------------
 #
 # build_revisions는 순수 함수라 story.py의 타임라인 생성이 그대로 재사용한다.
