@@ -9,12 +9,14 @@
 """
 from app.models.analysis import IN_PROGRESS, ReviewPrediction, SimilarPaperMatch
 from app.models.onboarding import OnboardingProfile
+from app.models.share import SubmissionShare
 from app.models.submission import Submission
 from app.models.user import User
 
 __all__ = [
     "User",
     "Submission",
+    "SubmissionShare",
     "ReviewPrediction",
     "SimilarPaperMatch",
     "IN_PROGRESS",

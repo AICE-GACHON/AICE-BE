@@ -61,6 +61,24 @@ def latest_prediction(db: Session, submission_id: uuid.UUID) -> ReviewPrediction
     ).first()
 
 
+def latest_done_prediction(db: Session,
+                           submission_id: uuid.UUID) -> ReviewPrediction | None:
+    """가장 최근에 **끝난** 분석. 공개 공유(routers/shared.py)가 보는 대상이다.
+
+    latest_prediction과 나뉘어 있는 이유: 공유해 둔 초안을 소유자가 다시 분석하면
+    가장 최근 행은 pending|running이 된다. 그걸 그대로 내보내면 링크를 받은 사람에게
+    **이미 잘 보이던 결과가 빈 화면으로 바뀐다** — 남의 재분석 때문에 내 링크가
+    깨지는 셈이라, 공개 쪽은 마지막으로 완성된 결과를 계속 보여준다.
+    """
+    return db.scalars(
+        select(ReviewPrediction)
+        .where(ReviewPrediction.submission_id == submission_id,
+               ReviewPrediction.status == "done")
+        .order_by(ReviewPrediction.created_at.desc())
+        .limit(1)
+    ).first()
+
+
 def active_prediction(db: Session, submission_id: uuid.UUID) -> ReviewPrediction | None:
     """진행 중(pending/running)인 분석. 부분 유니크 인덱스가 최대 1건을 보장한다."""
     return db.scalars(

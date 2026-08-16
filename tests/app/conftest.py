@@ -24,7 +24,7 @@ from app.routers import submissions as submissions_router
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 SERVICE_TABLES = {"users", "submissions", "review_predictions",
-                  "similar_paper_matches"}
+                  "similar_paper_matches", "submission_shares"}
 
 
 def _schema_ready() -> tuple[bool, str]:
