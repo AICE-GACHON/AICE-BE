@@ -12,11 +12,21 @@
 llm.py 규약을 그대로 따른다: use_llm이 꺼져 있으면 llm이 None이고, 이때는
 결정론적 스텁이 같은 스키마를 채운다 (비용 0). used_llm은 설정값이 아니라 실행
 결과다.
+
+**모델은 Haiku 4.5다.** 이 모듈은 판정을 하지 않는다 — 무엇이 지적이고 무엇이
+대응인지는 `_facts()`가 코드로 갈라 놓고, LLM은 그것을 한국어 네 필드로 옮긴다.
+비용도 이 선택을 밀었다(자세한 사정은 build_narrative의 호출부 주석).
+
+⚠️ 그래서 **`_SYSTEM`의 "EVIDENCE LIMITS" 다섯 항목을 지키는지가 이 모듈의 회귀
+지점이다.** 인과를 지어내지 않을 것, 본문 수정을 단정하지 않을 것, 점수 변화를
+말하지 않을 것 — 프롬프트 준수도는 모델을 낮출 때 가장 먼저 흔들리는 부분이고,
+여기서 무너지면 사용자에게는 그럴듯한 거짓말로 보인다. 프롬프트나 모델을 건드릴
+때는 이 다섯 항목부터 표본으로 확인할 것.
 """
 import json
 import logging
 
-from paper_assistant.llm import SONNET, SONNET_MAX_TOKENS
+from paper_assistant.llm import HAIKU, NARRATIVE_MAX_TOKENS
 from paper_assistant.schemas import (
     StoryNarrative, SubmissionJourney, TimelineEvent)
 
@@ -235,9 +245,21 @@ def build_narrative(title: str, venue: str, decision: str, review_points: list,
 
     facts = _facts(title, venue, decision, review_points, timeline, journey)
     try:
-        data = llm.json(SONNET, _SYSTEM,
+        # Haiku 4.5. 이 호출은 판정이 아니라 전사(轉寫)다 — 무엇이 지적이고 무엇이
+        # 대응인지는 _facts()가 이미 코드로 갈라 놓았고, 남은 일은 그 사실들을
+        # 한국어 네 필드로 옮기는 것뿐이다. Sonnet이 필요한 자리가 아니다.
+        #
+        # 비용이 이 결정을 밀어붙였다. 서사는 논문 1편을 열 때마다 도는데, 사용자는
+        # 분석 1회에 선정된 5편을 다 열어보는 것이 기본 동선이라 분석당 5회가 된다.
+        # 게다가 Sonnet으로 부를 때는 thinking/effort를 넘기지 않아 **adaptive
+        # thinking이 켜진 high effort**로 돌고 있었다(llm.ClaudeLLM.json 주석) —
+        # 종합보다 높은 설정이었고, 의도한 것이 아니었다.
+        #
+        # effort/thinking을 넘기지 않는 것은 여기서는 옳다. Haiku 4.5는 둘 다
+        # 거부한다(400).
+        data = llm.json(HAIKU, _SYSTEM,
                         json.dumps(facts, ensure_ascii=False),
-                        max_tokens=SONNET_MAX_TOKENS)
+                        max_tokens=NARRATIVE_MAX_TOKENS)
     except Exception as exc:
         # 서사는 부가 정보다. LLM이 죽었다고 타임라인까지 못 보여줄 이유가 없어
         # 스텁으로 내려앉는다.
