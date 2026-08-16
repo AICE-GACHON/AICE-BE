@@ -73,8 +73,8 @@ def test_oversized_pdf_is_rejected_without_buffering_it(client, auth):
 
 @pytest.mark.parametrize("payload", [
     {"user_type": "x" * 500},              # String(50) 컬럼 — 예전엔 DB에서 터져 500
-    {"venue": "x" * 500},                  # String(100)
-    {"purposes": ["y" * 5000]},            # JSONB — 원소 길이 제한이 없었다
+    {"venue": ["x" * 500]},                # JSONB — 원소 길이 제한이 없었다
+    {"fields": ["y" * 5000]},              # JSONB — 원소 길이 제한이 없었다
     {"fields": ["a"] * 500},               # JSONB — 개수 제한이 없었다
 ])
 def test_onboarding_rejects_oversized_input_with_422(client, payload):
