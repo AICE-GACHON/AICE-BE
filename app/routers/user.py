@@ -161,9 +161,9 @@ def update_my_onboarding(
 
     # 리스트 컬럼은 JSONB지만 nullable=False다(models/onboarding.py). 명시적으로
     # null을 보내오면 DB에서 터져 500이 되므로, 그건 "안 보낸 것"과 같이 취급한다.
-    # 비우고 싶으면 []를 보내면 된다. 반면 스칼라(venue 등)는 nullable이라
+    # 비우고 싶으면 []를 보내면 된다. 반면 스칼라(similarity_focus 등)는 nullable이라
     # null이 "답을 지웠다"는 뜻으로 유효하다 — 그대로 통과시킨다.
-    for name in ("purposes", "fields", "result_order"):
+    for name in ("fields", "venue"):
         if changes.get(name, ...) is None:
             changes.pop(name)
 

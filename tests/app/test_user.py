@@ -249,29 +249,28 @@ def test_onboarding_patch_creates_when_missing(client, auth):
     """
     assert client.get("/api/user/me/onboarding", headers=auth["headers"]).status_code == 404
 
-    res = _patch_onboarding(client, auth, stage="drafting", venue="ICLR")
+    res = _patch_onboarding(client, auth, user_type="researcher", venue=["ICLR"])
     assert res.status_code == 200, res.text
-    assert res.json()["data"]["stage"] == "drafting"
+    assert res.json()["data"]["user_type"] == "researcher"
 
     after = client.get("/api/user/me/onboarding", headers=auth["headers"])
     assert after.status_code == 200
-    assert after.json()["data"]["venue"] == "ICLR"
+    assert after.json()["data"]["venue"] == ["ICLR"]
 
 
 def test_onboarding_patch_updates_only_the_fields_sent(client, auth):
     """**안 보낸 필드는 그대로 남는다.**
 
     exclude_unset이 빠지면 여기서 걸린다 — venue 하나 고치려던 요청이
-    purposes/fields를 기본값 []로 덮어써 답변이 통째로 사라진다.
+    fields를 기본값 []로 덮어써 답변이 통째로 사라진다.
     """
-    _patch_onboarding(client, auth, user_type="student", purposes=["publish"],
-                      fields=["ML", "NLP"], venue="ICLR")
+    _patch_onboarding(client, auth, user_type="student",
+                      fields=["ML", "NLP"], venue=["ICLR"])
 
-    res = _patch_onboarding(client, auth, venue="NeurIPS")
+    res = _patch_onboarding(client, auth, venue=["NeurIPS"])
     assert res.status_code == 200, res.text
     data = res.json()["data"]
-    assert data["venue"] == "NeurIPS"
-    assert data["purposes"] == ["publish"]
+    assert data["venue"] == ["NeurIPS"]
     assert data["fields"] == ["ML", "NLP"]
     assert data["user_type"] == "student"
 
@@ -289,28 +288,36 @@ def test_onboarding_patch_null_list_is_not_a_500(client, auth):
 
     "안 보낸 것"과 같이 취급해 무시한다 — 비우려면 []를 보내면 된다.
     """
-    _patch_onboarding(client, auth, purposes=["publish"])
-    res = _patch_onboarding(client, auth, purposes=None)
+    _patch_onboarding(client, auth, fields=["ML"])
+    res = _patch_onboarding(client, auth, fields=None)
     assert res.status_code == 200, res.text
-    assert res.json()["data"]["purposes"] == ["publish"]
+    assert res.json()["data"]["fields"] == ["ML"]
+
+
+def test_onboarding_patch_null_venue_is_not_a_500(client, auth):
+    """venue도 fields와 같은 JSONB 리스트라 같은 함정이 있다."""
+    _patch_onboarding(client, auth, venue=["ICLR"])
+    res = _patch_onboarding(client, auth, venue=None)
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["venue"] == ["ICLR"]
 
 
 def test_onboarding_patch_keeps_answers_separate_between_users(client, auth, other_user):
     """남의 답변을 고치거나 읽으면 안 된다."""
-    _patch_onboarding(client, auth, venue="ICLR")
-    _patch_onboarding(client, other_user, venue="NeurIPS")
+    _patch_onboarding(client, auth, venue=["ICLR"])
+    _patch_onboarding(client, other_user, venue=["NeurIPS"])
 
     mine = client.get("/api/user/me/onboarding", headers=auth["headers"]).json()["data"]
     theirs = client.get("/api/user/me/onboarding", headers=other_user["headers"]).json()["data"]
-    assert mine["venue"] == "ICLR"
-    assert theirs["venue"] == "NeurIPS"
+    assert mine["venue"] == ["ICLR"]
+    assert theirs["venue"] == ["NeurIPS"]
     assert mine["onboarding_id"] != theirs["onboarding_id"]
 
 
 def test_onboarding_patch_rejects_unauthenticated(client):
-    assert client.patch("/api/user/me/onboarding", json={"venue": "ICLR"}).status_code == 401
+    assert client.patch("/api/user/me/onboarding", json={"venue": ["ICLR"]}).status_code == 401
 
 
 def test_onboarding_patch_enforces_the_same_limits_as_create(client, auth):
-    """수정이 생성보다 느슨하면 그쪽이 우회로가 된다 (venue는 String(100))."""
-    assert _patch_onboarding(client, auth, venue="X" * 101).status_code == 422
+    """수정이 생성보다 느슨하면 그쪽이 우회로가 된다 (venue 원소는 Item — 100자)."""
+    assert _patch_onboarding(client, auth, venue=["X" * 101]).status_code == 422
