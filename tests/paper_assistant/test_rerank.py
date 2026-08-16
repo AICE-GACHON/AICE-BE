@@ -191,6 +191,29 @@ def test_every_llm_call_path_logs_usage():
         assert "_log_usage" in src, f"{name}()에 사용량 로깅이 없다"
 
 
+def test_pdf_block_is_not_cached():
+    """읽히지 않는 캐시는 쓰기 프리미엄(1.25×)만 내는 순손실이다.
+
+    원래 설계는 종합 호출이 같은 PDF를 ~0.1×로 재사용하는 것을 전제로 캐시를
+    걸었는데, 구현된 종합은 PDF를 넘기지 않는다(리뷰 원문만 쓴다). 그래서 26p 기준
+    분석 1회 입력 토큰의 약 20%가 그대로 버려지고 있었다.
+
+    되살리려면 같은 PDF를 5분(기본 TTL) 안에 두 번 넘기는 경로를 **먼저** 만들고,
+    usage 로그의 cache_read_input_tokens가 0이 아닌지 확인할 것.
+    """
+    import ast as _ast
+    import inspect as _i
+    import textwrap as _t
+
+    from paper_assistant.llm import ClaudeLLM
+
+    # 주석·독스트링이 아니라 실제로 만들어 보내는 dict를 본다.
+    tree = _ast.parse(_t.dedent(_i.getsource(ClaudeLLM.structured_with_pdf)))
+    keys = [n.value for n in _ast.walk(tree)
+            if isinstance(n, _ast.Constant) and n.value == "cache_control"]
+    assert not keys, "PDF 블록에 cache_control이 다시 붙었다"
+
+
 def test_schema_has_no_numeric_similarity_field():
     """유사도 점수는 만들 수 없다(설계서 §20). 스키마 자체에서 배제한다."""
     from paper_assistant.graph.nodes import _SELECTION_SCHEMA
