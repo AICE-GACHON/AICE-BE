@@ -28,7 +28,10 @@ class OnboardingCreate(BaseModel):
     user_type: str | None = Field(default=None, max_length=_MAX_SHORT)
     experience: str | None = Field(default=None, max_length=_MAX_SHORT)
     fields: list[Item] = Field(default=[], max_length=_MAX_ITEMS)
-    # 둘 다 아직 검색 로직에는 반영하지 않는다 — 저장만 한다(models/onboarding.py).
+    # 둘 다 분석에 쓰인다 (models/onboarding.py 참고). **여기서 열거형으로 잠그지
+    # 않는 이유**: 이 엔드포인트가 거절하면 프론트가 선택지를 늘리는 순간 온보딩
+    # 저장이 통째로 실패한다. 대신 쓰는 쪽이 화이트리스트로 거르고 모르는 값은
+    # "균형있게"로 접는다 (paper_assistant.schemas.SearchPreferences).
     similarity_focus: str | None = Field(default=None, max_length=_MAX_SHORT)
     recency_bias: str | None = Field(default=None, max_length=_MAX_SHORT)
     venue: list[Item] = Field(default=[], max_length=_MAX_ITEMS)
