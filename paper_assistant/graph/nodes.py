@@ -14,6 +14,7 @@ Fisher도 통계적으로 무의미하다. 되살리려면 docs/추천_파이프
 """
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from paper_assistant.db.connection import cursor
 from paper_assistant.embedding.specter2 import (
@@ -25,6 +26,7 @@ from paper_assistant.llm import (
     RERANK_EFFORT, RERANK_MAX_TOKENS, SONNET, SONNET_EFFORT, SONNET_MAX_TOKENS)
 from paper_assistant.graph.progress import emit
 from paper_assistant.graph.state import PipelineState
+from paper_assistant.query.revisions import get_body_revision_count
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
     PaperSelection, Report, RetrievalConfidence, ReviewDetail, SelectedPaper,
@@ -258,6 +260,34 @@ def _validated_selections(raw: list, papers) -> list[PaperSelection]:
 # 값이 갈라지므로 evidence.py 하나가 소유한다.
 
 
+# 수정 횟수는 DB에 없다 — load.upsert_paper가 최신 버전만 남기므로 OpenReview를
+# 실시간으로 물어야 한다(query/revisions.py). 논문당 HTTP 1회라 5편을 순차로 돌면
+# 그만큼 분석이 길어져서 겹쳐 부른다. PDF는 안 받으므로 body-diff와 달리 가볍다.
+#
+# 여기서 겹치는 것은 분석 파이프라인 안이라 사용자를 기다리게 하지 않는다는 점이
+# 중요하다 — 목록 화면에서 논문마다 부르면 결과가 그 시간만큼 늦게 뜬다.
+_REVISION_WORKERS = 5
+
+
+def _attach_revision_counts(selected: list[SelectedPaper]) -> None:
+    """선정 논문에 본문 수정 횟수를 채운다. **실패해도 분석은 계속된다.**
+
+    표의 한 칸을 못 채우자고 분석 전체를 죽일 이유가 없다. 못 채운 칸은 None으로
+    남고, 화면은 그걸 "—"(=알 수 없음)로 그린다 — 0("안 고쳤다")과 섞이지 않는다.
+    """
+    if not selected:
+        return
+
+    def fill(paper: SelectedPaper) -> None:
+        try:
+            paper.revision_count = get_body_revision_count(paper.paper_id)
+        except Exception as e:      # 네트워크·파싱 등 무엇이 터지든
+            log.warning("수정 횟수 조회 실패 (paper_id=%s): %s", paper.paper_id, e)
+
+    with ThreadPoolExecutor(max_workers=_REVISION_WORKERS) as pool:
+        list(pool.map(fill, selected))
+
+
 def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
     """선정된 5편의 **리뷰 전문**을 가져온다 — 이 서비스가 실제로 파는 것.
 
@@ -334,6 +364,8 @@ def review_fetch_node(state: PipelineState, embedder, llm) -> dict:
             rating_count=len(rs),
             rating_spread=round(max(ratings) - min(ratings), 2) if ratings else None,
         ))
+
+    _attach_revision_counts(selected)
 
     emit("review_fetch",
          f"논문 {len(selected)}편의 리뷰 {sum(p.rating_count for p in selected)}건을 "

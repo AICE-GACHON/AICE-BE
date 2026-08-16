@@ -9,6 +9,7 @@
 """
 import json
 import logging
+import threading
 import time
 
 import jwt
@@ -172,10 +173,16 @@ VENUE_REGISTRY = {
 
 
 _clients: dict[str, OpenReviewClient] = {}
+# 캐시가 비어 있을 때 여러 스레드가 동시에 들어오면 생성자가 그 수만큼 돈다.
+# 생성자는 _authenticate()를 부르고 /login에는 rate limit이 있어서(모듈 docstring),
+# 하필 그 첫 호출이 겹치면 로그인이 무더기로 나가 막힌다. 논문 5편의 수정 이력을
+# 병렬로 읽는 경로(graph/nodes.py)가 정확히 그 모양이라 락으로 한 번만 만든다.
+_clients_lock = threading.Lock()
 
 
 def get_client(base: str) -> OpenReviewClient:
-    """API 버전별 클라이언트를 캐시해서 재사용 (재로그인 방지)."""
-    if base not in _clients:
-        _clients[base] = OpenReviewClient(base)
-    return _clients[base]
+    """API 버전별 클라이언트를 캐시해서 재사용 (재로그인 방지). 스레드 안전."""
+    with _clients_lock:
+        if base not in _clients:
+            _clients[base] = OpenReviewClient(base)
+        return _clients[base]

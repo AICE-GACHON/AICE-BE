@@ -476,3 +476,60 @@ def test_attach_body_diffs_reflects_renumbered_table_with_both_images():
     assert tables["Table 6"].after_image is not None
     assert tables["Table 5"].before_image is not None
     assert tables["Table 5"].after_image is None  # 진짜 삭제됨, 재배치와 안 섞인다
+
+
+# --- 본문 수정 횟수 (결과 표의 "본문 수정" 열) --------------------------------
+
+
+def _abstract_change():
+    return FieldChange(field="abstract", label="초록", kind="text",
+                       before="before text", after="after text")
+
+
+def test_count_body_revisions_ignores_metadata_only_edits():
+    # 실제로 흔한 모양이다: PDF는 그대로 두고 초록만 고친 edit이 앞뒤로 끼어든다
+    # (Lotus 논문 실측 — revisions.py buildVersionBlocks 주석). 리비전은 4건이지만
+    # "본문을 몇 번 고쳤나"의 답은 1이다.
+    revisions = _revisions_with([], [_abstract_change()], [_pdf_change()],
+                                [_abstract_change()])
+    assert len(revisions.revisions) == 4
+    assert R.count_body_revisions(revisions.revisions) == 1
+
+
+def test_count_body_revisions_excludes_baseline():
+    # baseline은 changes가 비어 있다(build_revisions) — 최초 제출은 수정이 아니다.
+    revisions = _revisions_with([])
+    assert R.count_body_revisions(revisions.revisions) == 0
+
+
+def test_count_body_revisions_counts_every_pdf_swap():
+    revisions = _revisions_with([], [_pdf_change()], [_pdf_change()], [_pdf_change()])
+    assert R.count_body_revisions(revisions.revisions) == 3
+
+
+def test_body_revision_count_none_when_venue_unsupported(monkeypatch):
+    # 2023년 이전 학회는 구 API라 저자 수정이 안 열린다. "안 고쳤다"가 아니라
+    # "볼 수 없다"이므로 0으로 내리면 화면이 거짓말을 하게 된다.
+    monkeypatch.setattr(R, "get_paper_revisions", lambda pid: PaperRevisions(
+        paper_id=pid, openreview_id="abc", supported=False))
+    assert R.get_body_revision_count(1) is None
+
+
+def test_body_revision_count_none_when_paper_missing(monkeypatch):
+    monkeypatch.setattr(R, "get_paper_revisions", lambda pid: None)
+    assert R.get_body_revision_count(1) is None
+
+
+def test_body_revision_count_none_when_history_empty(monkeypatch):
+    # supported지만 edit이 하나도 안 잡힌 경우 — 학회가 비공개로 뒀을 수 있어
+    # "안 고쳤다"라고 단정할 수 없다(get_paper_revisions의 message 참고).
+    monkeypatch.setattr(R, "get_paper_revisions", lambda pid: PaperRevisions(
+        paper_id=pid, openreview_id="abc", supported=True, revisions=[]))
+    assert R.get_body_revision_count(1) is None
+
+
+def test_body_revision_count_zero_is_a_confirmed_fact(monkeypatch):
+    # 이력을 읽었는데 전부 메타데이터 수정이었다 — 이건 확인된 0이라 None과 다르다.
+    revisions = _revisions_with([], [_abstract_change()])
+    monkeypatch.setattr(R, "get_paper_revisions", lambda pid: revisions)
+    assert R.get_body_revision_count(1) == 0
