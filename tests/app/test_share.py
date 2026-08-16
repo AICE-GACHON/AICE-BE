@@ -16,6 +16,7 @@ import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from app.core.rate_limit import limiter
 from app.models.analysis import ReviewPrediction
 from app.models.share import SubmissionShare
 from app.models.submission import Submission
@@ -225,6 +226,35 @@ def test_reanalysis_does_not_break_a_shared_link(client, auth, db, shared):
     res = client.get(f"/api/shared/{shared['token']}")
     assert res.status_code == 200, res.text
     assert res.json()["data"]["report"]["query_title"] == _REPORT["query_title"]
+
+
+def test_public_endpoint_actually_rate_limits(client, monkeypatch):
+    """⚠️ **상한이 코드에 적혀 있다는 것과 걸린다는 것은 다른 얘기다.**
+
+    2026-08-17까지 이 저장소의 경로 파라미터 라우트는 상한이 하나도 작동하지
+    않았다. slowapi의 기본 key_style="url"이 **요청 URL마다 바구니를 따로** 만들어서
+    `/api/papers/1/story`와 `/api/papers/2/story`가 각각 30회를 셌기 때문이다.
+    숫자가 코드에 멀쩡히 적혀 있어서 아무도 눈치채지 못했다.
+
+    공유 토큰에는 이게 치명적이다 — 대입 시도는 정의상 매 요청이 다른 URL이라
+    "url" 모드에서는 **영원히** 안 걸린다. 이슈 #30이 요구한 방어가 통째로 없는
+    상태가 된다.
+
+    그래서 여기서는 "설정이 endpoint인가"가 아니라 **실제로 429가 나오는가**를
+    본다. 설정을 검사하면 slowapi가 의미를 바꿨을 때 통과해 버린다.
+    """
+    limiter.enabled = True                     # autouse 픽스처가 꺼둔 것을 되돌린다
+    try:
+        limiter.reset()
+        codes = {client.get(f"/api/shared/tok-{i:04d}-{'a' * 20}").status_code
+                 for i in range(320)}
+    finally:
+        limiter.reset()
+        limiter.enabled = False
+
+    assert 429 in codes, (
+        "토큰마다 URL이 달라 상한이 걸리지 않았다 — "
+        "app/core/rate_limit.py의 key_style='endpoint'가 사라졌는지 확인할 것")
 
 
 def test_deleting_the_submission_kills_the_share(client, auth, db, shared):
