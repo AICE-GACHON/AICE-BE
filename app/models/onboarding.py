@@ -27,11 +27,24 @@ class OnboardingProfile(Base):
     )
     user_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     experience: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    purposes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     fields: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    venue: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    result_order: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # 값이 없다는 것 자체가 프론트의 "균형있게" 기본값과 같은 뜻이라, 별도
+    # sentinel 없이 nullable로 둔다.
+    #
+    # 둘 다 **분석에 실제로 쓰인다** (app/services/analysis.py _preferences_for →
+    # analyze(preferences=...)): similarity_focus는 2단계 재정렬 프롬프트,
+    # recency_bias는 1단계 랭킹 가중치 프리셋을 고른다.
+    #
+    # ⚠️ **여기 든 문자열을 신뢰하면 안 된다.** 이 행을 만드는 POST /api/onboarding은
+    # 인증이 없고(회원가입 전에 불린다) 컬럼은 자유 문자열이라, 누구든 임의의 문장을
+    # 넣을 수 있다. 읽는 쪽이 화이트리스트로 거른다
+    # (paper_assistant.schemas.SearchPreferences) — 거르지 않으면 이 값이 그대로
+    # 시스템 프롬프트에 붙는 프롬프트 인젝션 경로가 된다.
+    similarity_focus: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    recency_bias: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 프론트가 다중 선택(개수 제한 없음)으로 바뀌어서 fields와 같은 JSONB
+    # 리스트다. 예전엔 String(100) 하나였다(alembic 0016에서 마이그레이션).
+    venue: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # 다른 서비스 테이블과 같이 TIMESTAMPTZ다 (alembic 0002, 0007). 앱이 만든 값과
     # DB 서버 시각이 타임존 다른 환경에서 어긋나지 않게 하기 위함.
     created_at: Mapped[datetime] = mapped_column(

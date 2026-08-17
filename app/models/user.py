@@ -1,10 +1,11 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import String, Integer, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.legal import PRIVACY_VERSION, TERMS_VERSION
 from app.database import Base
 
 # openreview_id 자리표시자의 접두사. 베타에서는 가입 시 이 값을 받지 않는데
@@ -21,8 +22,13 @@ OPENREVIEW_ID_PENDING_PREFIX = "pending:"
 class User(Base):
     """
     사용자(users) 테이블.
-    이메일/비밀번호 또는 구글 로그인을 지원합니다 (카카오 로그인, 약관 동의 이력 등은
-    이번 주제에서는 불필요해서 뺐습니다. 필요해지면 나중에 테이블을 추가하면 됩니다).
+    이메일/비밀번호 또는 구글 로그인을 지원합니다 (카카오 로그인 등은 이번 주제에서는
+    불필요해서 뺐습니다. 필요해지면 나중에 테이블을 추가하면 됩니다).
+
+    약관 동의는 이력 테이블이 아니라 **현재 동의 상태**만 컬럼으로 들고 있습니다
+    (terms_agreed_at / terms_version / privacy_version). 재동의 때마다 덮어씁니다 —
+    "언제 어느 버전에 동의했는가"를 증명하는 데는 최신 한 건이면 충분하고, 과거
+    이력까지 남겨야 할 요구가 생기면 그때 별도 테이블로 옮기는 편이 낫습니다.
     """
     __tablename__ = "users"
 
@@ -43,11 +49,55 @@ class User(Base):
     # refresh_token(버전이 낮음)을 전부 무효화한다 (JWT는 상태가 없어 블랙리스트
     # 없이는 개별 폐기가 불가능하므로, 버전 비교로 대신한다).
     token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    # 약관·개인정보처리방침 동의 이력. 셋 다 **nullable이고, 그게 의도다** —
+    # 이 컬럼들이 생기기 전에 가입한 계정은 동의를 받은 적이 없다. 마이그레이션에서
+    # 기본값으로 채우면 받지도 않은 동의를 받았다고 기록하는 셈이라, 이력을 남기는
+    # 목적 자체를 배반한다. null은 "이력 없음"이고, 그 계정은 consent_up_to_date가
+    # False라서 프론트가 재동의를 받게 된다.
+    terms_agreed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # 동의 시점에 게시돼 있던 버전 (app/core/legal.py). 문서를 고치고 버전을 올리면
+    # 여기 값과 달라져 재동의 대상이 된다.
+    terms_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    privacy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
         nullable=False)
+
+    def record_consent(self) -> None:
+        """지금 게시 중인 버전에 동의했음을 기록합니다.
+
+        **시각만이 아니라 버전을 함께 찍는 것이 핵심입니다.** 시각만 남기면 문서를
+        한 번 개정한 순간부터 "2026-08-16에 동의함"이 어느 문구에 대한 동의인지
+        말해주지 못합니다.
+
+        가입(routers/auth.py)과 재동의(routers/user.py) 두 경로가 이 메서드를
+        공유합니다. 각자 세 줄씩 들고 있으면 나중에 항목이 하나 늘 때 한쪽만
+        고쳐지고, 그 사실은 분쟁이 나서 이력을 꺼내볼 때까지 아무도 모릅니다.
+        """
+        self.terms_agreed_at = datetime.now(timezone.utc)
+        self.terms_version = TERMS_VERSION
+        self.privacy_version = PRIVACY_VERSION
+
+    @property
+    def consent_up_to_date(self) -> bool:
+        """현재 게시 중인 약관·처리방침에 동의한 상태인지. 계산 필드입니다 (컬럼 아님).
+
+        **프론트가 버전 문자열을 직접 들고 비교하지 않게 하려고 서버가 판정합니다.**
+        프론트에 "1.0"을 박아두면 문서를 고치고 legal.py만 올렸을 때 재동의 화면이
+        안 뜨고, 그러면 아무도 오류를 못 봅니다 — 사용자는 옛 문구에 동의한 채로
+        계속 쓰고, 서버는 새 문구를 게시 중이라고 믿습니다.
+
+        False인 경우는 둘입니다: 동의 이력이 아예 없는 계정(컬럼 도입 전 가입)과,
+        동의는 했지만 그 뒤 문서가 개정된 계정. 프론트 입장에서는 둘 다 "재동의를
+        받아야 한다"로 같으므로 구분해서 내보내지 않습니다.
+        """
+        return (self.terms_version == TERMS_VERSION
+                and self.privacy_version == PRIVACY_VERSION)
 
     @property
     def google_linked(self) -> bool:

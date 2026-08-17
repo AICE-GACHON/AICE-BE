@@ -161,3 +161,42 @@ def test_facts_omit_resubmission_for_a_single_submission():
                        venue="ICLR 2024", year=2024, decision="reject")
     assert _facts("t", "ICLR 2024", "reject", [], [],
                   journey(stop))["resubmission"] is None
+
+
+# --------------------------------------------------------------- 비용 가드
+# 아래 둘은 동작이 아니라 **비용 결정**을 못 박는다. 어느 쪽도 깨져도 기능은
+# 멀쩡히 돌기 때문에, 테스트가 없으면 조용히 되돌아가고 청구서에서만 드러난다.
+
+def test_narrative_runs_on_the_cheap_model():
+    """서사는 판정이 아니라 전사다 — _facts()가 이미 사실을 갈라 놓았다.
+
+    논문 1편을 열 때마다 도는 호출이라 분석 1회(선정 5편)당 5회가 된다. Sonnet으로
+    올리면 이 항목만 10배가 되므로, 올릴 거면 그 근거를 여기 함께 적을 것.
+    """
+    from paper_assistant.query import narrative
+
+    assert narrative.HAIKU == "claude-haiku-4-5"
+
+
+def test_narrative_passes_no_thinking_or_effort():
+    """Haiku 4.5는 effort/adaptive thinking을 받지 않는다(400).
+
+    그리고 Sonnet 계열에서는 이걸 생략하는 것이 '기본값'이 아니라 **가장 비싼 값**을
+    고르는 것이다(adaptive thinking + effort=high). 모델을 올리는 사람이 이 사실을
+    모르고 호출부를 그대로 두면 종합보다 비싼 설정으로 돌게 된다.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from paper_assistant.query import narrative
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(narrative.build_narrative)))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "json"]
+    assert len(calls) == 1, "서사는 LLM을 한 번만 부른다"
+
+    # 주석이 아니라 실제로 넘기는 인자를 본다.
+    assert calls[0].args[0].id == "HAIKU"
+    assert {kw.arg for kw in calls[0].keywords} == {"max_tokens"}

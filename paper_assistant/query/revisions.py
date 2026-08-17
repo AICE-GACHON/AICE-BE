@@ -15,7 +15,10 @@ openreview_id로 upsert) **OpenReview API를 실시간 조회**한다. get_paper
 import base64
 import difflib
 import logging
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -28,11 +31,8 @@ from paper_assistant.pdf.extract import (
     MAX_BODY_PAGES,
     _looks_garbled,
     _MEDIA_PLACEHOLDER,
-    extract_box_texts,
-    extract_full_text,
-    extract_media_captions,
-    extract_media_images,
-    image_signature,
+    BodyExtract,
+    extract_body,
     image_similarity,
 )
 from paper_assistant.schemas import DiffSegment, FieldChange, PaperRevisions, RevisionEntry
@@ -294,6 +294,34 @@ def get_paper_revisions(paper_id: int) -> PaperRevisions | None:
 
     out.revisions = build_revisions(edits)
     return out
+
+
+# --- 본문 수정 횟수 — 결과 표(SelectedPaper.revision_count)가 쓰는 요약값 -------
+#
+# ⚠️ len(revisions)를 세면 안 된다. build_revisions는 edit을 전부 담으므로
+# 제목·초록만 고친 edit도 리비전 한 건으로 잡히는데, 화면이 묻는 것은 "본문을 몇
+# 번 고쳤나"다. pdf FieldChange가 달린 리비전만 세야 그 질문에 답이 된다.
+# baseline(최초 제출)은 changes가 비어 있어 자연히 빠진다 — 제출은 수정이 아니다.
+
+
+def count_body_revisions(revisions: list[RevisionEntry]) -> int:
+    """리비전 목록에서 본문 PDF가 실제로 교체된 건수. 네트워크·DB를 안 탄다."""
+    return sum(1 for r in revisions
+               if any(c.field == "pdf" for c in r.changes))
+
+
+def get_body_revision_count(paper_id: int) -> int | None:
+    """본문 PDF 교체 횟수. get_paper_revisions와 같은 비용(HTTP 1회)이고 PDF는 안 받는다.
+
+    **None과 0은 다른 사실이다.** None은 "볼 수 없다" — 2023년 이전 학회는 구
+    API라 저자가 고친 PDF가 외부에 안 열리고, 조회 실패나 이력 비공개도 여기 든다.
+    0은 "이력은 봤는데 본문은 안 고쳤다"로 확인된 사실이다. 화면도 이 둘을 다르게
+    쓴다(— / 없음).
+    """
+    revisions = get_paper_revisions(paper_id)
+    if revisions is None or not revisions.supported or not revisions.revisions:
+        return None
+    return count_body_revisions(revisions.revisions)
 
 
 # --- 본문(PDF 전체) diff — get_paper_revisions와 분리된 opt-in 확장 ------------
@@ -774,24 +802,148 @@ def _default_fetch_version(url: str) -> "_VersionExtract | None":
     잡는다 — 하나의 죽은 링크가 나머지 transition들의 diff까지 막으면 안 된다.
     본문 텍스트가 없거나 깨졌으면(스캔본 등) 그림·표도 신뢰할 수 없다고 보고
     전체를 None 처리한다.
+
+    필요한 것 전부를 extract_body 한 번으로 받는다 — 예전엔 추출기 넷을 따로
+    불러 같은 pdf 바이트를 네 번 열고 페이지 분석을 네 번 반복했다.
+
+    버전이 둘 이상이면 이 함수 대신 _prefetch_default가 돌아간다(다운로드와
+    추출을 나눠 동시에 처리). 이 함수는 그 경로를 못 쓰는 경우 — 가져올
+    URL이 하나뿐일 때 — 를 위한 단건 경로다.
+    """
+    pdf_bytes = _download_pdf(url)
+    if pdf_bytes is None:
+        return None
+    return _version_from_body(extract_body(pdf_bytes, max_pages=MAX_BODY_PAGES))
+
+
+def _download_pdf(url: str) -> bytes | None:
+    """PDF 한 건 다운로드. 죽은 링크(404 등)는 None으로 알린다.
+
+    다운로드만 따로 떼어 둔 이유는 추출과 병렬화 방식이 달라서다 — 다운로드는
+    네트워크 대기라 스레드로 충분히 겹치지만, 추출은 GIL에 묶여 스레드로는
+    안 겹친다(_prefetch_default 참고).
     """
     try:
-        pdf_bytes = get_client(V2).get_bytes(url)
+        return get_client(V2).get_bytes(url)
     except Exception as exc:
         log.warning("본문 diff용 PDF 다운로드 실패 (%s): %s", url, exc)
         return None
-    text = extract_full_text(pdf_bytes, max_pages=MAX_BODY_PAGES)
-    if text is None or _looks_garbled(text):
+
+
+def _version_from_body(body: BodyExtract) -> "_VersionExtract | None":
+    """extract_body 결과 → _VersionExtract. 못 믿을 추출이면 None."""
+    if body.text is None or _looks_garbled(body.text):
         return None
-    images = extract_media_images(pdf_bytes, max_pages=MAX_BODY_PAGES)
-    # 박스는 이미 내용 해시가 라벨이라 시그니처가 필요 없다 — 그림·표·알고리즘만.
-    signatures = {label: image_signature(png) for label, png in images.items()
-                 if not label.startswith("Box")}
-    return _VersionExtract(
-        text=text, images=images,
-        box_texts=extract_box_texts(pdf_bytes, max_pages=MAX_BODY_PAGES),
-        signatures=signatures,
-        captions=extract_media_captions(pdf_bytes, max_pages=MAX_BODY_PAGES))
+    return _VersionExtract(text=body.text, images=body.images, box_texts=body.box_texts,
+                           signatures=body.signatures, captions=body.captions)
+
+
+# PDF를 동시에 내려받을 최대 스레드 수. 논문 한 편의 pdf 교체 지점은 보통
+# 2~5개(=고유 URL 3~6개)라 이보다 늘려도 더 가져올 게 없고, OpenReview가
+# 429로 막을 위험만 커진다 — get_bytes의 재시도는 지수 백오프(5s, 10s, 20s...)
+# 라 한 번 걸리면 순차보다 오히려 느려진다.
+_MAX_DOWNLOAD_WORKERS = 4
+
+# 추출(파싱)을 동시에 돌릴 최대 **프로세스** 수. 스레드가 아니다 — 실측:
+# 논문 4편을 스레드로 동시에 추출하면 순차 대비 0.95배로 오히려 느리고
+# (53.7s → 56.6s), 프로세스로 돌리면 1.75배 빨라진다(→ 30.7s). 추출 시간의
+# 대부분을 PyMuPDF의 C 코드가 아니라 우리 파이썬 로직(블록 병합·영역 판단)이
+# 쓰기 때문에 GIL에 묶여 스레드로는 안 겹친다.
+#
+# 다운로드 쪽과 값이 같지만 근거는 완전히 별개다 — 이쪽 상한은 레이트리밋이
+# 아니라 서버의 CPU·메모리다(자식 하나가 PDF 원본 + 크롭 이미지를 통째로
+# 들고 있고, 이 엔드포인트는 캐시 미스마다 돈다).
+_MAX_PARSE_WORKERS = 4
+
+
+def _pdf_urls(paper_revisions: PaperRevisions) -> list[str]:
+    """본문 diff에 필요한 PDF URL 전부 — 등장 순서대로, 중복 없이.
+
+    attach_body_diffs의 루프가 URL을 만나는 순서와 같은 순서로 모은다(dict는
+    삽입 순서를 보존한다). 순서가 결과에 영향을 주지는 않지만, 로그·예외가
+    순차 경로와 같은 순서로 나오는 편이 디버깅에 낫다.
+    """
+    seen: dict[str, None] = {}
+    for entry in paper_revisions.revisions:
+        for change in entry.changes:
+            if change.field != "pdf" or change.kind != "file":
+                continue
+            for url in (change.before_url, change.after_url):
+                if url:
+                    seen.setdefault(url, None)
+    return list(seen)
+
+
+def _parse_executor(workers: int):
+    """추출용 실행기. 함수로 빼 둔 건 테스트가 프로세스를 안 띄우고도 이
+    경로(다운로드/추출 분리, 결과 조립)를 검증할 수 있게 하기 위해서다.
+    """
+    return ProcessPoolExecutor(max_workers=workers)
+
+
+def _prefetch_default(urls: list[str]) -> dict[str, "_VersionExtract | None"]:
+    """실제 경로 — 다운로드는 스레드로, 추출은 프로세스로 동시에 처리한다.
+
+    **두 단계를 다르게 병렬화하는 이유**(전부 실측):
+      - 다운로드는 네트워크 대기(실측: OpenReview 중앙값 1.0s/건)라 스레드로
+        온전히 겹친다.
+      - 추출은 15~25s/건인데 그 시간을 파이썬 로직이 쓴다 — 스레드로는 GIL에
+        묶여 안 겹치고(순차 53.7s vs 스레드 56.6s로 오히려 손해) 프로세스로만
+        실제로 겹친다(30.7s).
+
+    자식 프로세스가 import하는 건 paper_assistant.pdf.extract 하나뿐이다
+    (0.10s). 이 모듈(revisions)을 넘기면 psycopg·openreview 클라이언트까지
+    딸려 들어가 0.75s가 된다 — 그래서 자식에 보내는 건 "URL"이 아니라 이미
+    받아 둔 **pdf 바이트**이고, 네트워크·인증은 전부 부모가 맡는다.
+
+    예외는 그대로 올려보낸다 — 순차 경로에서도 모든 URL을 결국 한 번씩
+    가져오므로 "어떤 PDF가 터지면 요청 전체가 실패한다"는 동작이 같다.
+    죽은 링크(404) 같은 흔한 실패는 _download_pdf가 None으로 돌려준다.
+    """
+    with ThreadPoolExecutor(max_workers=min(len(urls), _MAX_DOWNLOAD_WORKERS)) as pool:
+        downloads = {url: pool.submit(_download_pdf, url) for url in urls}
+    # with 블록을 빠져나온 시점에 모든 작업이 끝나 있다 — 결과를 여기서 읽으면
+    # 중간에 예외가 올라와도 남은 스레드가 매달려 있지 않다.
+    pdfs = {url: future.result() for url, future in downloads.items()}
+
+    out: dict[str, "_VersionExtract | None"] = {url: None for url in urls}
+    live = [url for url, data in pdfs.items() if data is not None]
+    if not live:
+        return out
+
+    workers = min(len(live), _MAX_PARSE_WORKERS, os.cpu_count() or 1)
+    try:
+        with _parse_executor(workers) as pool:
+            extracts = {url: pool.submit(extract_body, pdfs[url], MAX_BODY_PAGES)
+                        for url in live}
+        bodies = {url: future.result() for url, future in extracts.items()}
+    except (OSError, BrokenProcessPool) as exc:
+        # 프로세스를 못 띄우거나(권한이 막힌 컨테이너 등) 자식이 죽은 경우.
+        # 추출 자체가 던진 예외는 여기 안 걸리고 그대로 올라간다 — 이건
+        # "병렬로 못 돌린다"는 신호일 때만 이 프로세스에서 다시 한다.
+        log.warning("추출 병렬 실행 실패 — 이 프로세스에서 순차로 처리합니다: %s", exc)
+        bodies = {url: extract_body(pdfs[url], max_pages=MAX_BODY_PAGES) for url in live}
+
+    for url, body in bodies.items():
+        out[url] = _version_from_body(body)
+    return out
+
+
+def _prefetch_versions(urls: list[str],
+                       fetch: Callable[[str], "_VersionExtract | None"]
+                       ) -> dict[str, "_VersionExtract | None"]:
+    """URL들을 동시에 가져온다 — {url: _VersionExtract | None}.
+
+    실제 경로는 _prefetch_default(다운로드=스레드, 추출=프로세스)로 간다.
+    주입된 fetch(테스트용 가짜)는 프로세스에 보낼 수 없으므로(지역 함수라
+    피클되지 않는다) 스레드로 동시에 부른다 — 오케스트레이션 계약(같은 URL은
+    한 번만, 동시 호출, 예외 전파)은 양쪽이 같다.
+    """
+    if fetch is _default_fetch_version:
+        return _prefetch_default(urls)
+    with ThreadPoolExecutor(max_workers=min(len(urls), _MAX_DOWNLOAD_WORKERS)) as pool:
+        futures = {url: pool.submit(fetch, url) for url in urls}
+    return {url: future.result() for url, future in futures.items()}
 
 
 def _data_uri(png_bytes: bytes | None) -> str | None:
@@ -808,7 +960,7 @@ def _numbered(labels) -> list[str]:
     return sorted(labels, key=key)
 
 
-# 박스는 저자 번호가 없어 내용 해시로 식별한다(_box_regions 참고) — 완전히
+# 박스는 저자 번호가 없어 내용 해시로 식별한다(_box_regions_and_texts 참고) — 완전히
 # 같으면 해시도 같아 자동으로 매칭되지만, 살짝만 고쳐도 해시가 통째로
 # 달라져 "관계 없는 두 박스"처럼 보인다. 이 임계값 이상 비슷하면 "같은
 # 박스가 수정됨"으로, 미만이면 "박스 하나는 없어지고 다른 박스가 새로
@@ -951,9 +1103,30 @@ def attach_body_diffs(paper_revisions: PaperRevisions,
     다운로드+PyMuPDF 대신 URL→_VersionExtract 매핑을 흉내 낸 가짜 함수로
     오케스트레이션(중복 다운로드 방지, skip 조건, 삽입 위치)만 검증한다.
     인자를 생략하면 실제 네트워크 경로(_default_fetch_version)를 쓴다.
+
+    ⚠️ fetch_version은 **여러 스레드에서 동시에 호출된다**(_prefetch_versions).
+    URL 하나만 보고 결과를 만드는 함수여야 하며, 공유 상태를 건드린다면
+    그쪽에서 직접 보호해야 한다.
     """
     fetch = fetch_version or _default_fetch_version
+
+    # 필요한 PDF를 **아래 루프에 들어가기 전에 한꺼번에** 가져온다. 루프
+    # 안에서 그때그때 가져오면 버전 수만큼 다운로드와 추출이 그대로 직렬로
+    # 쌓인다(v1→v2→v3면 셋을 순서대로) — 버전끼리는 서로의 결과를 전혀
+    # 참조하지 않으므로 동시에 처리해도 결과가 달라지지 않는다.
+    # 캐시(dict)는 그대로 남긴다: 같은 URL이 앞 리비전의 after와 다음
+    # 리비전의 before로 두 번 등장하는 흔한 경우를 여전히 한 번만 가져오고,
+    # 혹시 미리 못 모은 URL이 있어도 예전처럼 그 자리에서 가져온다.
+    urls = _pdf_urls(paper_revisions)
     cache: dict[str, "_VersionExtract | None"] = {}
+    if len(urls) > 1:
+        if fetch is _default_fetch_version:
+            # 다운로드 스레드를 띄우기 전에 클라이언트 생성·로그인을 끝내
+            # 둔다 — get_client는 첫 호출에서 세션을 만들고 /login까지 하는데,
+            # 여러 스레드가 동시에 처음 부르면 로그인이 중복으로 나가고
+            # 세션 헤더(Authorization)를 서로 덮어쓴다.
+            get_client(V2)
+        cache.update(_prefetch_versions(urls, fetch))
 
     def _version_for(url: str | None) -> "_VersionExtract | None":
         if not url:

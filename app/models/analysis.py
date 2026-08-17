@@ -69,6 +69,17 @@ class ReviewPrediction(Base):
     confidence_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_reliable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
+    # 분석이 지금 어디까지 왔는지 (paper_assistant.schemas.ProgressEvent의 배열).
+    # status가 pending|running인 동안 화면이 보여줄 유일한 내용이다 — 이 컬럼이
+    # 없으면 "분석 중" 말고 할 수 있는 말이 없다.
+    #
+    # ⚠️ **파이썬에서 append로 늘리지 마세요.** SQLAlchemy는 JSON 값의 제자리
+    # 변경을 추적하지 않아서(MutableList로 감싸지 않는 한) 조용히 저장되지 않습니다.
+    # 실제로 쓰는 곳은 app/services/analysis.py의 UPDATE ... || jsonb 하나뿐이고,
+    # 그 이유도 거기 적혀 있습니다.
+    progress: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list)
+
     # stub = LLM 없이 규칙/통계만 ($0, 기본) | llm = Haiku/Sonnet 실제 호출.
     # 설정값이 아니라 Report.used_llm(실행 결과)에서 옮겨 적습니다.
     explanation_source: Mapped[str] = mapped_column(

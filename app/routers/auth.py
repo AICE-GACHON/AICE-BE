@@ -84,12 +84,31 @@ def _require_invite(code: str | None) -> None:
         )
 
 
+def _require_consent(agreed: bool) -> None:
+    """신규 가입에는 약관·개인정보처리방침 동의가 있어야 한다.
+
+    **_require_invite와 마찬가지로 가입 경로가 둘이라 두 곳에서 부른다.** /signup만
+    막으면 구글 버튼으로 동의 없이 계정이 만들어진다.
+
+    이미 있는 계정의 로그인에는 요구하지 않는다. 약관이 개정돼 재동의가 필요해도
+    로그인 자체를 막지 않는다 — 막으면 그 사용자는 재동의도, 탈퇴도, 자기 자료
+    내려받기도 할 수 없게 된다. 재동의는 로그인 뒤 consent_up_to_date를 보고
+    서비스 안에서 받는다.
+    """
+    if not agreed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="이용약관과 개인정보처리방침에 동의해야 가입할 수 있습니다.",
+        )
+
+
 @router.post("/signup", response_model=ApiResponse[UserResponse], status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
 def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_db)):
     # DB를 건드리기 **전에** 검사한다. 뒤에 두면 초대받지 않은 사람도 409/201 차이로
     # 어떤 이메일이 이미 가입돼 있는지 알아낼 수 있다.
     _require_invite(payload.invite_code)
+    _require_consent(payload.agreed_to_terms)
 
     if db.query(User).filter(User.email == payload.email).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 가입된 이메일입니다.")
@@ -100,6 +119,7 @@ def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_d
         nickname=payload.nickname,
         openreview_id=_openreview_id_or_placeholder(payload.openreview_id),
     )
+    user.record_consent()
     db.add(user)
     try:
         db.commit()
@@ -191,8 +211,9 @@ def google_login(request: Request, payload: GoogleLoginRequest, db: Session = De
 
     if user is None:
         # 🔴 여기가 신규 가입 경로다. /signup만 막고 이 줄을 빠뜨리면 구글 버튼으로
-        #    초대 게이트가 통째로 우회된다.
+        #    초대 게이트와 약관 동의가 통째로 우회된다.
         _require_invite(payload.invite_code)
+        _require_consent(payload.agreed_to_terms)
 
         # openreview_id는 베타에서 받지 않는다 (이메일 가입과 같은 이유).
         # 예전에는 여기서 400으로 되돌려보내 프론트가 다시 물어보게 했다.
@@ -207,6 +228,7 @@ def google_login(request: Request, payload: GoogleLoginRequest, db: Session = De
             google_sub=google_sub,
             openreview_id=_openreview_id_or_placeholder(payload.openreview_id),
         )
+        user.record_consent()
         db.add(user)
         try:
             db.commit()

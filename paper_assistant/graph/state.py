@@ -7,7 +7,8 @@ from typing import TypedDict
 
 from paper_assistant.retrieval.hybrid_search import SearchResult
 from paper_assistant.schemas import (
-    PaperSelection, Report, RetrievalConfidence, SelectedPaper)
+    PaperSelection, Report, RetrievalConfidence, SearchPreferences,
+    SelectedPaper)
 
 
 class PipelineState(TypedDict, total=False):
@@ -15,6 +16,11 @@ class PipelineState(TypedDict, total=False):
     query_title: str
     query_abstract: str
     pdf_bytes: bytes | None
+    # 온보딩 선호. **반드시 상태로 흐른다 — 노드에 바인딩하면 안 된다.**
+    # 컴파일된 그래프는 use_llm만 키로 쓰는 프로세스 전역 캐시에 들어가므로
+    # (pipeline._graphs), build()에서 partial로 묶으면 첫 사용자의 선호가 이후
+    # 모든 사용자의 분석에 적용된다. 값이 없으면 기본값(balanced)이다.
+    preferences: SearchPreferences
 
     # --- 검색 (retrieval_node) ---
     query_embedding: list

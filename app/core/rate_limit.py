@@ -79,4 +79,19 @@ if _storage_uri:
 else:
     log.info("rate limit 저장소: 프로세스 메모리 — 워커를 늘리면 상한이 워커 수만큼 커집니다")
 
-limiter = Limiter(key_func=client_ip, storage_uri=_storage_uri)
+# ⚠️ **key_style="endpoint"를 지우지 마세요. 지우면 상한이 조용히 사라집니다.**
+#
+# slowapi의 기본값은 "url"이고, 그 모드에서는 바구니 키가 **요청 URL 전체**다
+# (slowapi/extension.py의 `_endpoint_key = endpoint_url if ...`). 경로 파라미터가
+# 있는 라우트에서는 URL이 요청마다 달라지므로 바구니도 매번 새로 생긴다 —
+# `/api/papers/1/story`와 `/api/papers/2/story`가 각각 30회를 따로 센다.
+#
+# 그래서 2026-08-17까지 **경로 파라미터가 있는 상한은 하나도 작동하지 않았다.**
+# 실측으로 `/story`·`/revisions`에 40회를 던져도 429가 0건이었다(로그인처럼 URL이
+# 고정된 엔드포인트만 정상 동작했다). 코드에 숫자가 적혀 있어서 아무도 눈치채지
+# 못하는 종류의 실패다.
+#
+# "endpoint"는 뷰 함수 이름을 키로 쓰므로 같은 라우트의 모든 요청이 한 바구니에
+# 모인다. 공유 링크(`/api/shared/{token}`)에는 이게 특히 중요하다 — 토큰 대입은
+# 정의상 매 요청이 다른 URL이라, "url" 모드에서는 상한이 **영원히** 걸리지 않는다.
+limiter = Limiter(key_func=client_ip, storage_uri=_storage_uri, key_style="endpoint")

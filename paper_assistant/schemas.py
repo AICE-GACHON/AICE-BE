@@ -12,7 +12,7 @@ docs/추천_파이프라인_재설계.md 결정 #1을 먼저 읽을 것.
 값이 되기 때문이다. 대신 `rank`(순위), `match_type`(왜 걸렸는지),
 그리고 쿼리 단위 `RetrievalConfidence`(결과를 믿어도 되는지)를 준다.
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class SimilarPaper(BaseModel):
@@ -99,6 +99,16 @@ class SelectedPaper(BaseModel):
     rating_count: int = 0
     rating_spread: float | None = Field(
         default=None, description="최고-최저 점수 차. 크면 리뷰어 의견이 갈렸다는 뜻")
+
+    # --- 리뷰를 받고 얼마나 고쳤는가 ---
+    revision_count: int | None = Field(
+        default=None,
+        description="저자가 **본문 PDF를 교체한 횟수**. 리비전 총 개수가 아니다 — "
+                    "제목·초록만 고친 edit은 세지 않는다(query/revisions.py의 "
+                    "count_body_revisions). **None과 0은 다른 값이다**: None은 "
+                    "'볼 수 없다'(2023년 이전 학회는 수정 이력이 비공개, 조회 실패 "
+                    "포함), 0은 '확인해 보니 본문을 안 고쳤다'. 화면이 이 둘을 "
+                    "'—'와 '없음'으로 다르게 그리므로 0으로 뭉개면 안 된다")
 
 
 class PaperSelection(BaseModel):
@@ -508,6 +518,91 @@ class RetrievalConfidence(BaseModel):
         description="top-5 평균 코사인. **진단용 — 사용자에게 노출 금지**")
 
 
+class ProgressEvent(BaseModel):
+    """분석이 지금 어디까지 왔는지 1건 (analyze(on_event=...)로 흘러나온다).
+
+    **사용자 화면에 그대로 띄울 수 있는 단위다.** 분석은 수십 초~수 분이 걸리는데
+    그동안 백엔드가 아는 것이 pending/running뿐이라 화면도 "분석 중…" 한 줄밖에
+    쓸 수 없었다. 그 침묵을 없애려고 파이프라인이 단계마다 이걸 내보낸다.
+
+    `label`은 **한국어 완성 문장**이다. 화면이 step id로 문구를 만들지 않는 이유는,
+    같은 단계라도 실제로 한 일이 다르기 때문이다 — 재정렬은 LLM이 고른 경우와
+    검색 상위를 그대로 쓴 경우가 있고, 그 둘을 같은 문구로 덮으면 스텁 결과가
+    LLM 판정으로 오인된다(Report.used_llm과 같은 규약). 무엇을 했는지 아는 쪽이
+    문구를 만든다.
+
+    ⚠️ **진행률(%)은 담지 않는다.** 단계별 소요 시간이 극단적으로 불균등해서
+    (첫 호출 모델 로드 수십 초, 재정렬 수십 초, 나머지는 수 초) 어떤 비율도
+    사실이 아니게 된다. 유사도 점수를 만들지 않는 것과 같은 이유다(설계서 §20).
+    """
+    step: str = Field(
+        description="prepare | extract | retrieval | rerank | review_fetch | synthesis. "
+                    "화면이 단계 순서와 아이콘을 정하는 키")
+    done: bool = Field(
+        default=False,
+        description="False면 이 단계를 시작했다(진행 중), True면 끝났다. 같은 step으로 "
+                    "두 번 온다 — 화면은 step 기준으로 최신 것을 쓰면 된다")
+    label: str = Field(description="사용자에게 그대로 보여줄 한 줄")
+    detail: str | None = Field(
+        default=None,
+        description="곁들일 한 줄 (선정 논문 제목, 신뢰도 경고 등). 없을 수 있다")
+    at: str = Field(description="발생 시각 (ISO 8601, UTC)")
+
+
+SIMILARITY_FOCUS_VALUES = ("problem", "method", "evaluation", "balanced")
+RECENCY_BIAS_VALUES = ("recent", "cited", "balanced")
+
+# 모르는 값이 왔을 때 떨어질 자리. "값이 없다 = 균형있게"는 온보딩 저장 규약과
+# 같다 (app/models/onboarding.py — nullable에 sentinel을 두지 않는 이유).
+_DEFAULT_PREFERENCE = "balanced"
+
+_ALLOWED_PREFERENCES = {
+    "similarity_focus": SIMILARITY_FOCUS_VALUES,
+    "recency_bias": RECENCY_BIAS_VALUES,
+}
+
+
+class SearchPreferences(BaseModel):
+    """온보딩 2단계 답변 — "유사 논문을 고를 때 무엇을 우선할까".
+
+    similarity_focus는 **2단계 LLM 재정렬의 판정 기준**을 바꾸고(어떤 축의 일치를
+    더 무겁게 볼지), recency_bias는 **1단계 검색의 랭킹 가중치**를 바꾼다
+    (hybrid_search.RANKING_PRESETS). 두 값이 서로 다른 층에 걸리는 것은 우연이
+    아니다 — 임베딩은 문제/방법/평가를 구분하지 못하고(제목+초록을 벡터 하나로
+    만든다), 반대로 LLM에게는 연도·인용 백분위를 판정 근거로 줄 수 없다.
+
+    ⚠️ **화이트리스트 밖의 값은 조용히 balanced로 떨어진다.** 이 값의 출처가
+    `POST /api/onboarding`인데 그 엔드포인트는 **인증이 없고**(회원가입 전에
+    불린다) 컬럼은 자유 문자열 String(50)이다. 즉 누구든 임의의 문장을 넣을 수
+    있고, 그 문자열이 그대로 시스템 프롬프트에 붙으면 프롬프트 인젝션 경로가
+    된다. 그래서 문자열을 프롬프트로 나르지 않고 **여기서 걸러낸 키로 상수
+    테이블을 조회**한다 (graph/nodes.py의 _FOCUS_RULES, hybrid_search의
+    RANKING_PRESETS). 422로 거절하지 않고 떨어뜨리는 이유는, 이것이 사용자 입력
+    검증이 아니라 이미 저장된 값을 읽는 자리이기 때문이다 — 옛 값이나 프론트가
+    선택지를 늘렸다 되돌린 흔적 때문에 분석이 통째로 실패하면 안 된다.
+    """
+    similarity_focus: str = Field(
+        default=_DEFAULT_PREFERENCE,
+        description="problem | method | evaluation | balanced. 2단계 재정렬이 "
+                    "어떤 축의 일치를 더 무겁게 볼지")
+    recency_bias: str = Field(
+        default=_DEFAULT_PREFERENCE,
+        description="recent | cited | balanced. 1단계 랭킹 가중치 프리셋을 고른다")
+
+    @field_validator("similarity_focus", "recency_bias", mode="before")
+    @classmethod
+    def _known_value_or_balanced(cls, v, info: ValidationInfo):
+        """None·오타·주입 시도를 전부 balanced로 접는다 (위 ⚠️ 참고)."""
+        allowed = _ALLOWED_PREFERENCES[info.field_name]
+        return v if v in allowed else _DEFAULT_PREFERENCE
+
+    @property
+    def is_default(self) -> bool:
+        """둘 다 기본값인가 — 화면이 "맞춤 적용" 문구를 띄울지 정하는 데 쓴다."""
+        return (self.similarity_focus == _DEFAULT_PREFERENCE
+                and self.recency_bias == _DEFAULT_PREFERENCE)
+
+
 class Report(BaseModel):
     """analyze()의 최종 반환. 프론트가 섹션별로 렌더링할 수 있도록 구조화."""
     query_title: str
@@ -544,3 +639,10 @@ class Report(BaseModel):
         default=False,
         description="이 리포트가 실제 LLM 호출로 만들어졌는지. False면 태깅·요약이 "
                     "결정론적 스텁이다. 근거 추적용 — 설정값이 아니라 실행 결과다.")
+    preferences: SearchPreferences = Field(
+        default_factory=SearchPreferences,
+        description="이 분석에 **실제로 적용된** 온보딩 선호. used_llm과 같은 규약이다 "
+                    "— 온보딩 테이블의 현재 값이 아니라 이 실행이 쓴 값이라, 사용자가 "
+                    "나중에 마이페이지에서 답을 바꿔도 지난 분석의 기록은 변하지 않는다. "
+                    "이게 없으면 '왜 이 5편이 나왔나'를 사후에 가릴 수 없고, "
+                    "similar_paper_matches에 쌓이는 품질 신호도 프리셋별로 나눌 수 없다.")

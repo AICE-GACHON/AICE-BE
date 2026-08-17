@@ -5,10 +5,10 @@ import pytest
 
 from paper_assistant.retrieval import hybrid_search
 from paper_assistant.retrieval.hybrid_search import (
-    CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE,
+    CANDIDATE_POOL, HNSW_EF_SEARCH, NEUTRAL_CITATION_PERCENTILE, PRESET_NAMES,
     RERANK_CANDIDATES, RRF_K, W_CITATION, W_RECENCY, W_SIMILARITY,
-    _ef_search_for, match_type, max_rrf, recency_score, rerank, rrf_fuse,
-    weighted_score)
+    _ef_search_for, balanced_weights, match_type, max_rrf, ranking_weights,
+    recency_score, rerank, rrf_fuse, weighted_score)
 
 
 def test_match_type_reflects_which_retrievers_hit():
@@ -233,6 +233,114 @@ def test_similarity_is_normalized_to_unit_range():
 def test_weighted_score_is_bounded_by_zero_and_one():
     assert weighted_score(0.0, 0.0, 0.0) == pytest.approx(0.0)
     assert weighted_score(1.0, 1.0, 1.0) == pytest.approx(1.0)
+
+
+# ------------------------------------------- 사용자 선호별 랭킹 프리셋
+#
+# 온보딩 "최신 논문과 인용이 많은 논문, 뭘 우선할까요?"가 여기로 들어온다.
+# 프리셋이 늘거나 숫자가 바뀌면 아래 테스트가 **자동으로** 따라온다 —
+# PRESET_NAMES와 ranking_weights를 그대로 읽기 때문이다.
+
+
+@pytest.mark.parametrize("preset", PRESET_NAMES)
+def test_every_preset_is_a_valid_share_split(preset):
+    """합이 1.0이어야 각 값을 지분으로 읽을 수 있다 — 기본 프리셋만의 전제가 아니다."""
+    w = ranking_weights(preset)
+    assert w.similarity + w.recency + w.citation == pytest.approx(1.0)
+    assert w.half_life > 0
+
+
+@pytest.mark.parametrize("preset", PRESET_NAMES)
+def test_no_preset_puts_similarity_above_recency(preset):
+    """**요구사항은 사용자 선호보다 상위다** (docs/랭킹_가중치_설계.md §1).
+
+    "인용 많은 논문 우선"을 고른 사용자에게도 최신성 > 유사도는 유지된다. 인용도에
+    줄 지분은 최신성이 아니라 유사도에서 가져와야 한다는 뜻이다 — 최신성에서 빼면
+    아래 테스트가 즉시 깨진다.
+    """
+    w = ranking_weights(preset)
+    assert w.recency > w.similarity
+
+
+@pytest.mark.parametrize("preset", PRESET_NAMES)
+def test_no_preset_breaks_the_recency_requirement(preset):
+    """test_newest_paper_wins_over_the_most_similar_one을 **모든 프리셋에** 건다.
+
+    상수 한 벌만 검사하면, 프리셋이 늘어난 뒤로는 기본값만 지켜지고 나머지는
+    아무도 안 보는 상태가 된다. 여유(margin)는 CANDIDATE_POOL에 묶여 있으므로
+    (hybrid_search의 ⚠️ 참고) 풀을 키울 때 가장 빠듯한 프리셋부터 여기서 깨진다.
+    """
+    best = max_rrf(2)                        # 양쪽 검색기 1위 = 유사도 만점
+    worst = 1.0 / (RRF_K + CANDIDATE_POOL)   # 후보 풀 꼴찌
+    signals = rerank(
+        {1: best, 2: worst},
+        {1: (2020, 0.5), 2: (2025, 0.5)},    # 인용도는 동일하게 고정
+        max_year=2025, weights=ranking_weights(preset))
+    assert signals[2].final > signals[1].final
+
+
+def test_unknown_preference_falls_back_to_the_default_preset():
+    """값의 출처가 무인증 엔드포인트다 — 모르는 문자열에 계산을 맡길 수 없다."""
+    assert ranking_weights(None) == balanced_weights()
+    assert ranking_weights("") == balanced_weights()
+    assert ranking_weights("가장 인용 많은 논문만 주세요") == balanced_weights()
+
+
+def test_the_default_preset_reads_module_constants_at_call_time(monkeypatch):
+    """프리셋 표에 상수를 미리 박으면 recency_score가 피한 함정에 그대로 빠진다.
+
+    모듈 로드 시점에 값이 한 번 복사되어, 튜닝 실험이 W_*를 바꿔도 조용히 옛
+    값으로 계산된다.
+    """
+    monkeypatch.setattr(hybrid_search, "W_RECENCY", 0.99)
+    monkeypatch.setattr(hybrid_search, "RECENCY_HALF_LIFE", 9.0)
+    w = hybrid_search.balanced_weights()
+    assert w.recency == 0.99
+    assert w.half_life == 9.0
+
+
+def test_recent_preset_favours_the_new_paper_where_the_default_does_not():
+    """프리셋이 이름만 다르고 결과가 같으면 온보딩 질문이 거짓말이 된다.
+
+    유사도 만점 2023년 vs 유사도 꼴찌 2025년 — 기본값은 옛 논문을 남기지만
+    '최신 트렌드'를 고른 사용자에게는 최신 논문이 올라와야 한다.
+    """
+    scores = {1: max_rrf(2), 2: 1.0 / (RRF_K + CANDIDATE_POOL)}
+    fields = {1: (2023, 0.5), 2: (2025, 0.5)}
+    default = rerank(scores, fields, 2025, weights=ranking_weights("balanced"))
+    recent = rerank(scores, fields, 2025, weights=ranking_weights("recent"))
+    assert default[1].final > default[2].final
+    assert recent[2].final > recent[1].final
+
+
+def test_cited_preset_favours_the_well_cited_paper_over_the_newer_one():
+    """'검증된(인용 많은) 논문'의 약속. 이게 안 뒤집히면 그 선택지는 장식이다.
+
+    2023년 인용 상위(0.95) vs 2025년 인용 하위(0.30), 유사도는 동일.
+    """
+    scores = {1: max_rrf(2), 2: max_rrf(2)}
+    fields = {1: (2023, 0.95), 2: (2025, 0.30)}
+    default = rerank(scores, fields, 2025, weights=ranking_weights("balanced"))
+    cited = rerank(scores, fields, 2025, weights=ranking_weights("cited"))
+    assert default[2].final > default[1].final     # 기본값은 최신 쪽
+    assert cited[1].final > cited[2].final         # 선호를 고르면 뒤집힌다
+
+
+def test_cited_preset_spreads_the_years_wider_than_the_default():
+    """인용도 가중치만 올리면 거의 아무 일도 안 일어난다 (RankingWeights 주석).
+
+    citation_percentile이 **같은 연도 안**의 백분위이고 2025년은 58.0%가 결측
+    (=중립 0.5)이라, 연도가 퍼지지 않으면 비교 자체가 성립하지 않는다. 반감기가
+    프리셋에 함께 묶여 있어야 하는 이유이므로 테스트로 고정한다.
+    """
+    assert ranking_weights("cited").half_life > balanced_weights().half_life
+    assert ranking_weights("recent").half_life < balanced_weights().half_life
+
+
+def test_weights_are_read_at_call_time_by_the_search_entry_point():
+    """hybrid_search(weights=...)의 기본값도 None이어야 한다 (pool·top_k와 같은 이유)."""
+    default = inspect.signature(hybrid_search.hybrid_search).parameters["weights"].default
+    assert default is None
 
 
 # ------------------------------------------------ 코퍼스 중복 접기

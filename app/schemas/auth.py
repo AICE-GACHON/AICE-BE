@@ -54,6 +54,13 @@ class SignupRequest(BaseModel):
     # SIGNUP_INVITE_CODE가 설정된 배포에서만 필요하다. 비어 있으면(개발 기본값)
     # 이 필드는 무시된다. 길이 상한은 비교 전에 거대한 문자열을 받지 않기 위한 것.
     invite_code: str | None = Field(default=None, max_length=200)
+    # 이용약관·개인정보처리방침 동의. **true가 아니면 가입이 400으로 거절된다.**
+    #
+    # 필수 필드(default 없음)로 두지 않는 이유는 구글 가입과 응답을 맞추기 위해서다 —
+    # 거기서는 이미 있는 계정의 로그인에 동의를 요구하지 않으므로 필수로 만들 수 없고,
+    # 한쪽만 422가 나오면 프론트가 같은 상황을 두 갈래로 처리해야 한다. 초대 코드와
+    # 같은 방식으로 라우터에서 함께 400으로 거른다.
+    agreed_to_terms: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -75,6 +82,11 @@ class GoogleLoginRequest(BaseModel):
     # 이미 있는 계정의 로그인/연동에는 요구하지 않는다 (초대받아 가입한 사람이
     # 로그인할 때마다 코드를 다시 입력해야 한다면 그건 초대가 아니라 비밀번호다).
     invite_code: str | None = Field(default=None, max_length=200)
+    # agreed_to_terms도 같다 — **처음 구글로 가입할 때만** 필요하다. 로그인할 때마다
+    # 다시 물으면 그건 동의가 아니라 확인 버튼이다. 약관이 개정돼 재동의가 필요한
+    # 경우는 로그인을 막는 대신 consent_up_to_date로 알려주고, 프론트가 서비스 안에서
+    # 받는다 (로그인 자체를 막으면 탈퇴조차 못 하게 된다).
+    agreed_to_terms: bool = False
 
 
 class RefreshRequest(BaseModel):
@@ -137,6 +149,12 @@ class UserResponse(ORMBase, TimestampMixin):
     has_password: bool = Field(
         description="비밀번호로 로그인할 수 있는 계정인지. "
                     "false면 구글 전용이라 비밀번호 변경이 400이고, 탈퇴에 비밀번호가 필요 없다")
+    # 버전 문자열 자체는 내보내지 않는다 — 프론트가 "1.0"을 들고 비교하기 시작하면
+    # 문서를 개정했을 때 서버만 올라가고 화면은 그대로인 상태가 조용히 생긴다.
+    # 판정은 서버가 하고, 프론트는 이 불리언만 본다 (models/user.py).
+    consent_up_to_date: bool = Field(
+        description="현재 게시 중인 약관·개인정보처리방침에 동의한 상태인지. "
+                    "false면 재동의를 받아야 한다 (동의 이력이 없거나, 그 뒤 문서가 개정된 경우)")
 
     @field_validator("openreview_id", mode="after")
     @classmethod

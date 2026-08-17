@@ -5,7 +5,7 @@ from pydantic import Field
 
 from app.schemas.common import ORMBase, TimestampMixin
 from app.schemas.submission import SimilarPaperMatchResponse
-from paper_assistant.schemas import Report
+from paper_assistant.schemas import ProgressEvent, Report
 
 
 class AnalysisStartResponse(ORMBase, TimestampMixin):
@@ -27,6 +27,15 @@ class AnalysisResponse(ORMBase, TimestampMixin):
     prediction_id: uuid.UUID
     submission_id: uuid.UUID
     status: str
+    progress: list[ProgressEvent] = Field(
+        default_factory=list,
+        description="분석이 지금 어디까지 왔는지 (일어난 순서). **status가 "
+                    "pending|running인 동안 화면이 보여줄 내용이 이것뿐입니다.** "
+                    "폴링할 때마다 지금까지의 전체 목록이 오므로, 폴링 간격보다 "
+                    "짧게 지나간 단계도 빠지지 않습니다. 같은 step이 done=false와 "
+                    "true로 두 번 오니 step 기준으로 최신 것을 쓰세요. "
+                    "⚠️ 진행률(%)은 없습니다 — 단계별 소요 시간이 너무 달라서 어떤 "
+                    "비율도 사실이 아니게 됩니다. 만들어 붙이지 마세요.")
     report: Report | None = None
     confidence_level: str | None = None   # strong | moderate | weak
     is_reliable: bool | None = None

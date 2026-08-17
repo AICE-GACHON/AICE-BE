@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import inspect, text
 
 from app.core import mail
+from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.database import Base, SessionLocal, engine, get_db
 from app.main import app
@@ -23,7 +24,7 @@ from app.routers import submissions as submissions_router
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 SERVICE_TABLES = {"users", "submissions", "review_predictions",
-                  "similar_paper_matches"}
+                  "similar_paper_matches", "submission_shares"}
 
 
 def _schema_ready() -> tuple[bool, str]:
@@ -97,6 +98,23 @@ def _no_ambient_smtp(monkeypatch):
         monkeypatch.setattr(mail.settings, name, "")
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_invite_code(monkeypatch):
+    """가입 초대 코드도 주변 환경에서 물려받지 않는다 (_no_ambient_smtp와 같은 이유).
+
+    `.env`에 SIGNUP_INVITE_CODE가 채워져 있으면 — 배포를 만지면 실제로 그렇게 된다 —
+    conftest의 signup 픽스처가 코드 없이 가입을 시도하다 403을 받고, 그 픽스처에
+    기대는 **백엔드 테스트 전부**가 무더기로 ERROR가 된다. 실패 지점이 픽스처라
+    메시지도 "초대 코드가 필요합니다"뿐이어서, 처음 보면 무엇이 깨졌는지가 아니라
+    왜 다 깨졌는지부터 헷갈린다.
+
+    게이트가 켜진 상태를 검증하는 테스트는 직접 채워 쓴다
+    (tests/app/test_invite_gate.py의 invite_required). autouse가 먼저 돌고 명시
+    픽스처가 뒤에 덮으므로 순서 문제는 없다.
+    """
+    monkeypatch.setattr(settings, "SIGNUP_INVITE_CODE", "")
+
+
 @pytest.fixture
 def db():
     """바깥 트랜잭션 안에서 도는 세션. 테스트가 끝나면 전부 롤백된다.
@@ -147,9 +165,12 @@ def signup(client):
     """회원가입 + 로그인까지 마친 뒤 토큰을 돌려주는 헬퍼."""
     def _signup(password: str = "password123") -> dict:
         email = _unique_email()
+        # agreed_to_terms를 빼면 400이다 (app/routers/auth.py _require_consent).
+        # 동의 게이트 자체를 검증하는 것은 tests/app/test_terms_consent.py이고,
+        # 나머지 테스트는 "동의는 이미 했다"를 전제로 본론만 본다.
         res = client.post("/api/auth/signup", json={
             "email": email, "password": password, "nickname": "tester",
-            "openreview_id": _unique_openreview_id()})
+            "openreview_id": _unique_openreview_id(), "agreed_to_terms": True})
         assert res.status_code == 201, res.text
         token = client.post("/api/auth/login", json={
             "email": email, "password": password}).json()["data"]["access_token"]

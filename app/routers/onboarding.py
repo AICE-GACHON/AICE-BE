@@ -22,11 +22,10 @@ def create_onboarding(request: Request, payload: OnboardingCreate, db: Session =
     profile = OnboardingProfile(
         user_type=payload.user_type,
         experience=payload.experience,
-        purposes=payload.purposes,
         fields=payload.fields,
-        stage=payload.stage,
+        similarity_focus=payload.similarity_focus,
+        recency_bias=payload.recency_bias,
         venue=payload.venue,
-        result_order=payload.result_order,
     )
     db.add(profile)
     db.commit()
