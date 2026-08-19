@@ -26,11 +26,13 @@
 - 논문의 리비전 이력(`/revisions`이 이미 하는 title/abstract/keywords 비교)에
   **본문·그림·표 diff를 추가로 얹은** 버전.
 - `refresh=true`면 캐시 무시하고 재계산 — 로그인 필요(비로그인 스캔 방지).
-- Rate limit `10/hour`(IP 기준) — `/revisions`(`30/hour`)보다 좁다. 캐시 없는
-  호출 1번이 PDF 여러 개를 다운로드+파싱+diff하는 무거운 작업이라서다.
-- 프론트는 현재 `AICE-FE/src/dev/BodyDiffTest.jsx`라는 **개발자용 테스트
-  페이지**에만 붙어 있고, 실제 서비스 화면(`ResultReport.jsx`)에는 아직 안
-  붙었다 — 통합 계획은 7절 참고.
+- Rate limit `30/hour`(IP 기준) — `/revisions`(2026-08-17에 30→**100/hour**로 상향)보다
+  좁다. 캐시 없는 호출 1번이 PDF 여러 개를 다운로드+파싱+diff하는 무거운 작업이라서다.
+- ✅ 프론트에 통합 완료 — "심사 과정 보기"를 누르면 뜨는 `PaperStoryPanel`
+  왼쪽에 `BodyDiffPanel`(`AICE-FE/src/features/workspace/story/`)로 뜬다.
+  아래 7절의 계획대로 구현됐다. 개발자용 테스트 페이지(`src/dev/BodyDiffTest.jsx`)는
+  이제 안 쓰이는 파일로 남아 있다(`App.jsx`의 `?dev=body-diff` 진입 분기는 이미
+  제거됨 — 파일 자체는 아직 안 지워졌다).
 
 ---
 
@@ -172,12 +174,14 @@ get_paper_revisions_with_body(paper_id)          [revisions.py]
 
 ---
 
-## 7. 프론트엔드 통합 계획
+## 7. 프론트엔드 통합 (완료)
 
-지금은 `AICE-FE/src/dev/BodyDiffTest.jsx`라는 **개발자용 테스트 페이지**에만
-붙어 있다.
+✅ 아래 "결정된 방향"대로 구현됐다. `PaperStoryPanel.jsx`가 `BodyDiffPanel`을
+직접 import해서 렌더한다(`AICE-FE/src/features/workspace/story/BodyDiffPanel.jsx`).
+이 절은 통합 당시의 계획 기록으로 남겨둔다 — 지금 구조를 보려면 위 컴포넌트를
+직접 읽는 게 더 정확하다.
 
-### 지금 화면 구조
+### 통합 전 화면 구조 (참고용, 과거 기록)
 
 `SelectedPapers.jsx`의 `PaperCard`에 있는 **"심사 과정 보기"** 버튼
 (`onOpenStory(paper.paper_id)`)을 누르면 `ResultReport.jsx`가
