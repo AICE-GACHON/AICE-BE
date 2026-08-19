@@ -64,26 +64,36 @@ AICE/
 │   │   ├── config.py            # 백엔드 전용 설정 (공유 값은 paper_assistant/config.py)
 │   │   ├── security.py          # 비밀번호 해시 + JWT 생성/검증
 │   │   ├── deps.py              # get_current_user 등 Depends 함수
-│   │   └── errors.py            # 전역 예외 핸들러 (응답 포맷 통일)
+│   │   ├── errors.py            # 전역 예외 핸들러 (응답 포맷 통일)
+│   │   ├── mail.py               # 비밀번호 재설정 메일 발송
+│   │   ├── legal.py              # 약관·개인정보처리방침 원문 로드(app/legal/*.md)
+│   │   ├── middleware.py         # 요청 단위 미들웨어
+│   │   └── google_oauth.py       # 구글 id_token 검증
 │   ├── models/                 # SQLAlchemy 모델 — 서비스 테이블만
 │   │   ├── user.py               # users
 │   │   ├── submission.py         # submissions
 │   │   ├── analysis.py           # review_predictions, similar_paper_matches
-│   │   └── onboarding.py         # onboarding_profiles
+│   │   ├── onboarding.py         # onboarding_profiles
+│   │   └── share.py              # submission_shares
 │   ├── routers/
-│   │   ├── auth.py               # 회원가입/로그인/구글 로그인/refresh/logout
-│   │   ├── user.py               # 내 정보 조회/수정/탈퇴, 온보딩 조회
-│   │   ├── submissions.py        # 내 논문 업로드(PDF)·조회·삭제 + 분석 시작/조회 (핵심)
+│   │   ├── auth.py               # 회원가입/로그인/구글 로그인/refresh/logout/비밀번호 재설정
+│   │   ├── user.py               # 내 정보 조회/수정/탈퇴, 온보딩 조회/수정, 약관 재동의
+│   │   ├── submissions.py        # 내 논문 업로드(PDF)·조회·삭제 + 분석 시작/조회 + 공유 (핵심)
 │   │   ├── corpus.py             # 코퍼스 논문 목록/상세/리뷰/수정 이력 (AI 파트 위임)
-│   │   └── onboarding.py         # 회원가입 전 익명 온보딩 답변 저장
+│   │   ├── onboarding.py         # 회원가입 전 익명 온보딩 답변 저장
+│   │   ├── legal.py              # 약관·개인정보처리방침 원문 조회 (인증 불필요)
+│   │   └── shared.py             # 공유 토큰으로 비로그인 공개 조회
 │   ├── schemas/                # Pydantic 요청/응답 스키마
 │   │   ├── common.py             # ApiResponse[T]
 │   │   ├── auth.py / submission.py / analysis.py
-│   │   └── corpus.py             # AI 파트 스키마 재수출 (중복 정의 금지)
+│   │   ├── corpus.py             # AI 파트 스키마 재수출 (중복 정의 금지)
+│   │   ├── share.py              # 공유 링크 발급/공개 응답
+│   │   └── legal.py              # 약관 문서 응답
 │   └── services/               # 도메인 규칙 — 라우터에는 HTTP 관심사만 남긴다
 │       ├── submissions.py        # 업로드 검증(용량·페이지·길이)·추출·저장, 소유권
-│       └── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
-├── paper_assistant/          # AI 파트 (공개 API 9개)
+│       ├── analysis.py         # ★ 백엔드와 AI 파트가 만나는 유일한 지점
+│       └── shares.py           # 공유 토큰 발급/폐기/조회
+├── paper_assistant/          # AI 파트 (공개 API 10개)
 │   ├── config.py               # ★ 공유 환경설정의 단일 소스
 │   ├── schemas.py              # Report 등 통합 계약 스키마
 │   ├── llm.py                  # Claude 래퍼 — graph/·query/·pdf/가 함께 쓴다
@@ -101,7 +111,7 @@ AICE/
 │   ├── paper_assistant/        # AI 파트
 │   └── meta/                   # 설정·경계 드리프트 (소스만 읽으므로 DB 불필요)
 ├── docs/                     # 설계서·팀 공유 문서·개발 문서
-├── alembic/versions/         # 0001 초기 테이블 … 0011 PDF 저장 + LLM 선정 (아래 §4 참고)
+├── alembic/versions/         # 0001 초기 테이블 … 0018 공유 링크 (아래 §4 참고)
 ├── docker-compose.yml        # pgvector Postgres (포트 5433)
 ├── pyproject.toml            # pytest 설정 (pythonpath)
 ├── requirements.txt          # 런타임 의존성
@@ -116,11 +126,16 @@ DB는 하나지만 **소유자가 둘로 나뉩니다.** 이 경계를 넘지 �
 [ 서비스 테이블 — alembic이 관리 ]        [ 논문 코퍼스 — scripts/init_db.sql이 관리 ]
 
 users ──< submissions                     papers ──< reviews ──< review_points
-  │           │                             │  └──< paper_authors >── authors
-  │           └──< review_predictions       │  └──< submission_links (재투고 흐름)
-  │                     │                   venue_stats, aspect_base_rates, ingest_status
+  │           │    │                        │  └──< paper_authors >── authors
+  │           │    └──< submission_shares   │  └──< submission_links (재투고 흐름)
+  │           └──< review_predictions       venue_stats, aspect_base_rates, ingest_status
+  │                     │
   │                     └──< similar_paper_matches ┄┄(paper_id, FK 없음)┄┄> papers
   └──< onboarding_profiles (1:1, user_id nullable — 회원가입 전엔 주인 없음)
+
+[ 코퍼스 캐시 — AI 파트가 조건부 생성(papers 테이블 있을 때만) ]
+paper_stories ┄┄(paper_id, FK 없음)┄┄> papers        # /story 결과 캐시
+paper_body_diffs ┄┄(paper_id, FK 없음)┄┄> papers     # /revisions/body-diff 결과 캐시
 ```
 
 ### 서비스 테이블
@@ -131,13 +146,16 @@ users ──< submissions                     papers ──< reviews ──< rev
   계정이 있어 nullable입니다 (`alembic/versions/0004_add_google_and_openreview_id.py`).
   `token_version`은 refresh_token 폐기용 버전 카운터로, 로그아웃 시 증가시켜 그
   이전에 발급된 refresh_token을 전부 무효화합니다
-  (`alembic/versions/0003_add_user_token_version.py`).
+  (`alembic/versions/0003_add_user_token_version.py`). `terms_agreed_at`·
+  `terms_version`·`privacy_version`은 약관 재동의(`POST /api/user/me/consent`)
+  추적용입니다 (`alembic/versions/0015_terms_consent.py`).
 - **submissions**: 사용자가 올린 내 논문. **PDF 원본을 `pdf_bytes`에 저장합니다** —
   분석이 BackgroundTasks라 응답 이후에 도는데, 2단계 LLM이 본문·참고문헌을 봐야 하기
   때문입니다. ⚠️ `deferred=True`로 매핑돼 있습니다(최대 20MB 블롭이라, 아니면 목록
   조회가 행마다 이걸 끌어옵니다). 임베딩은 저장하지 않고 분석할 때마다 계산합니다.
 - **review_predictions**: 분석 1회분. 백그라운드 작업의 상태(`pending/running/done/failed`)이자
-  결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다.
+  결과 저장소로, 분석 결과 전체가 `report` JSONB에 들어갑니다. `progress` JSONB
+  컬럼(`alembic/versions/0014_analysis_progress.py`)에 폴링용 진행 단계가 담깁니다.
 - **similar_paper_matches**: 검색 후보 **50편 전부**와 그중 LLM이 고른 것
   (`rank`=검색 순위, `selected`, `llm_rank`=화면 순서, `selection_reason`).
   후보까지 남기는 이유는 **"검색이 뽑은 것"과 "LLM이 고른 것"의 관계가 이 파이프라인의
@@ -148,7 +166,20 @@ users ──< submissions                     papers ──< reviews ──< rev
   그때 연결됩니다 — 세션 쿠키 없이 스테이트리스 구조를 유지하기 위한 설계입니다
   (`alembic/versions/0005_add_onboarding_profiles.py`). 회원가입 없이 이탈한
   미연결 행은 `scripts/cleanup_stale_onboarding.py`로 주기적으로 정리하세요
-  (기본 30일 지난 행 삭제, `--dry-run`으로 미리 확인 가능).
+  (기본 30일 지난 행 삭제, `--dry-run`으로 미리 확인 가능). 로그인 후에는
+  `PATCH /api/user/me/onboarding`(마이페이지)으로도 upsert됩니다(아래 §7).
+  `venue`는 원래 문자열 하나였다가 다중 선택 리스트(JSONB)로 바뀌었고, `similarity_focus`·
+  `recency_bias`가 분석 파이프라인에 실제로 쓰이도록 추가됐습니다(`alembic 0016`).
+  쓰이지 않던 `purposes`·`result_order`·`stage`는 `alembic 0017`에서 제거했습니다.
+- **submission_shares**: 로그인 없이 열람 가능한 공개 공유 링크의 토큰
+  (`token`은 `secrets.token_urlsafe`, `revoked_at`으로 폐기 여부 관리,
+  `alembic/versions/0018_submission_shares.py`). `GET /api/shared/{token}`이 이
+  테이블로 소유자 정보 없이 `title`·`abstract`·`field`·`report`만 돌려줍니다.
+- **paper_stories / paper_body_diffs**: `/story`와 `/revisions/body-diff` 결과 캐시.
+  alembic이 관리하지만(`0009_paper_stories_cache.py`, `0013_paper_body_diffs_cache.py`)
+  `papers` 테이블(코퍼스)이 있을 때만 조건부로 만들어집니다 — 서비스 DB와 코퍼스 DB가
+  분리된 환경(코퍼스 없이 서버만 띄운 경우)에서도 `alembic upgrade head`가 깨지지
+  않게 하기 위해서입니다.
 
 ### 논문 코퍼스 (AI 파트 소유, 43,515편)
 - **papers / reviews / review_points**: ICLR 2020–2025 + NeurIPS 2021–2024에서 수집한
@@ -200,12 +231,14 @@ autogenerate 대상에서도 제외하므로, 백엔드가 마이그레이션을
 
 ## 5. 로컬 실행 방법
 
-[README.md](README.md)의 "로컬 실행"을 따르세요. 기존과 달라진 점만 요약하면:
+[README.md](../README.md)의 "로컬 실행"을 따르세요. 기존과 달라진 점만 요약하면:
 
 - DB는 로컬 PostgreSQL이 아니라 `docker compose up -d`로 띄우는 **pgvector 인스턴스(5433)** 입니다.
 - 논문 코퍼스는 git에 없습니다. `scripts/restore_db.sh`로 DB 덤프를 복원해야 합니다.
-- `alembic upgrade head`는 서비스 테이블 5개(`users`, `submissions`,
-  `review_predictions`, `similar_paper_matches`, `onboarding_profiles`)만 만듭니다.
+- `alembic upgrade head`는 서비스 테이블 6개(`users`, `submissions`,
+  `review_predictions`, `similar_paper_matches`, `onboarding_profiles`,
+  `submission_shares`)를 만듭니다. `paper_stories`·`paper_body_diffs`는 코퍼스가
+  이미 복원돼 있을 때만 조건부로 추가됩니다(위 §4).
 
 ## 6. 프론트/백엔드가 반드시 지켜야 할 것
 
@@ -254,6 +287,13 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 
 ## 7. 구현 완료 API 목록
 
+⚠️ **요청/응답 필드의 정확한 타입·필수 여부는 여기가 아니라 Swagger가 정본입니다**
+(`/docs`, `/openapi.json` — FastAPI가 라우터에서 자동 생성하므로 코드와 어긋날 수
+없습니다). 아래 표는 필드 나열이 아니라 **Swagger에 안 나오는 것**(멱등성·rate
+limit·왜 이런 상태 코드를 쓰는지 같은 동작 근거)을 남기는 용도입니다. 새 엔드포인트를
+추가했다면 이 표에도 한 줄 추가하고 [CHANGELOG.md](../CHANGELOG.md)에도 적으세요 —
+둘 다 손으로 관리되므로 자동으로 따라오지 않습니다.
+
 모든 응답은 `{ "success": bool, "data": ..., "error": { "code", "message" } | null }` 형태로
 통일돼 있습니다 (`app/schemas/common.py`의 `ApiResponse[T]`).
 
@@ -264,10 +304,15 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 | Auth | `POST /api/auth/google` | 구글 로그인/연동 (id_token 검증, 신규 가입 시 openreview_id 필수) | - |
 | Auth | `POST /api/auth/refresh` | refresh_token으로 access_token 재발급 (refresh_token도 회전) | - |
 | Auth | `POST /api/auth/logout` | 로그아웃 (User.token_version 증가 → 이전 refresh_token 전부 무효화) | 필요 |
+| Auth | `POST /api/auth/password/forgot` | 비밀번호 재설정 메일 발송 (계정 존재 여부는 알리지 않음) | - |
+| Auth | `POST /api/auth/password/reset` | 재설정 토큰으로 비밀번호 변경 | - |
 | User | `GET /api/user/me` | 내 정보 조회 | 필요 |
-| User | `PATCH /api/user/me` | 내 정보 수정 (nickname, openreview_id) | 필요 |
+| User | `PATCH /api/user/me` | 내 정보 수정 (nickname, openreview_id, 비밀번호) | 필요 |
 | User | `DELETE /api/user/me` | 회원 탈퇴 (submissions 이하 CASCADE 삭제) | 필요 |
+| User | `POST /api/user/me/consent` | 개정된 약관·개인정보처리방침에 재동의 (body 없음, 호출 자체가 동의) | 필요 |
 | User | `GET /api/user/me/onboarding` | 내 온보딩 답변 조회 (마이페이지) | 필요 |
+| User | `PATCH /api/user/me/onboarding` | 내 온보딩 답변 수정 (없으면 upsert로 생성, 보낸 필드만 갱신) | 필요 |
+| Legal | `GET /api/legal/{document}` | 약관("terms")·개인정보처리방침("privacy") 원문 조회. IP 기준 **60회/분** | - |
 | Submission | `POST /api/submissions/pdf` | 내 논문 업로드 — **유일한 입력 경로**. title/abstract가 비면 PDF에서 추출, 응답에 `page_count`. 추출 실패·60p 초과는 422, **20MB 초과는 413** | 필요 |
 | Submission | `GET /api/submissions` | 내 초안 목록 (최신순, 본문 제외) | 필요 |
 | Submission | `GET /api/submissions/{id}` | 초안 상세 | 필요 |
@@ -280,8 +325,9 @@ SPECTER2 코사인 유사도는 상위 20편 안에서 폭이 **0.013**밖에 �
 | Corpus | `GET /api/papers` | 코퍼스 논문 목록 (venue/year/field/q 필터, limit/offset 페이지네이션) | - |
 | Corpus | `GET /api/papers/{paper_id}` | 코퍼스 논문 상세 (초록·리뷰 전문·지적 항목) | - |
 | Corpus | `GET /api/papers/{paper_id}/reviews` | 그 논문의 리뷰 목록 | - |
-| Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**). IP 기준 **30회/시간** | - |
-| Corpus | `GET /api/papers/{paper_id}/story` | 심사 서사 — 재투고 궤적 + 리뷰·응답·수정 타임라인 + 요약 (**외부 API + LLM**, `paper_stories`에 캐시). IP 기준 **30회/시간**, `refresh=true`는 **로그인 필요** | -<br>(refresh만 필요) |
+| Corpus | `GET /api/papers/{paper_id}/revisions` | 저자 수정 이력 (**외부 API 실시간 조회**). IP 기준 **100회/시간** | - |
+| Corpus | `GET /api/papers/{paper_id}/revisions/body-diff` | `/revisions`에 pdf 교체 지점의 본문 전체 단어 단위 diff를 얹은 버전 (`paper_body_diffs`에 캐시, LLM 미사용). IP 기준 **30회/시간**, `refresh=true`는 **로그인 필요** | -<br>(refresh만 필요) |
+| Corpus | `GET /api/papers/{paper_id}/story` | 심사 서사 — 재투고 궤적 + 리뷰·응답·수정 타임라인 + 요약 (**외부 API + LLM**, `paper_stories`에 캐시). IP 기준 **100회/시간**, `refresh=true`는 **로그인 필요** | -<br>(refresh만 필요) |
 | Onboarding | `POST /api/onboarding` | 회원가입 전 익명 온보딩 답변 저장 | - |
 
 ⚠️ `paper_id`는 UUID가 아니라 **BIGINT**입니다 (코퍼스가 BIGSERIAL). 분석 결과의
@@ -308,15 +354,18 @@ refresh_token은 JWT라 상태가 없어 개별 폐기가 불가능합니다. �
 발급 시점의 버전을 담아 재발급 요청마다 비교합니다 — 어긋나면 거부합니다
 (`app/core/security.py`, `app/routers/auth.py`).
 
-인증 없이 열려 있는 엔드포인트(signup/login/google/refresh/onboarding)는 IP 기준
-rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signup/login/google
-10/분, refresh 20/분, onboarding 5/분.
+인증 없이 열려 있는 엔드포인트(signup/login/google/refresh/onboarding/password
+forgot·reset/legal/shared)는 IP 기준 rate limit이 걸려 있습니다(`slowapi`,
+`app/core/rate_limit.py`) — signup/login/google 10/분, refresh 20/분, onboarding 5/분,
+password/forgot 5/분, password/reset 10/분, legal 60/분, `/shared/{token}` 300/시간.
 
-**`/papers/{id}/revisions`와 `/papers/{id}/story`도 30회/시간으로 묶여 있습니다.**
-이 둘만 외부 자원을 쓰기 때문입니다(OpenReview 2콜, `/story`는 LLM까지). 인증을 걸지
-않은 이유는 랜딩의 데모가 비로그인으로 `/story`를 부르기 때문이고, 캐시된 논문을 다시
-읽는 것은 DB 조회 1번이라 비용이 없습니다 — 막아야 할 것은 **캐시에 없는 논문을 연달아
-훑는 것**이라 시간당 상한이 맞습니다.
+**`/papers/{id}/revisions`와 `/papers/{id}/story`는 100회/시간으로 묶여 있습니다**
+(2026-08-17에 30→100으로 상향). 이 둘만 외부 자원을 쓰기 때문입니다(OpenReview 2콜,
+`/story`는 LLM까지). 인증을 걸지 않은 이유는 랜딩의 데모가 비로그인으로 `/story`를
+부르기 때문이고, 캐시된 논문을 다시 읽는 것은 DB 조회 1번이라 비용이 없습니다 —
+막아야 할 것은 **캐시에 없는 논문을 연달아 훑는 것**이라 시간당 상한이 맞습니다.
+`/revisions/body-diff`는 캐시 미스 1건의 비용이 더 커서 **30회/시간**으로 더 좁게
+잡혀 있습니다.
 
 ⚠️ **`refresh=true`만 로그인을 요구합니다.** 캐시를 우회하므로 같은 논문에 반복하면
 시간당 상한을 무의미하게 만들고 호출마다 LLM이 돕니다. 비로그인 요청은 조용히 캐시를
@@ -328,18 +377,21 @@ rate limit이 걸려 있습니다(`slowapi`, `app/core/rate_limit.py`) — signu
 ## 8. AI팀 연동 방식
 
 AI 파트는 **같은 프로세스에서 import**해서 씁니다 (별도 서비스 아님). 공개 계약은
-함수 아홉 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
+함수 열 개이고, `paper_assistant/__init__.py`의 `__all__`이 그 목록입니다.
 
 ```python
 from paper_assistant import (
     analyze, warmup, get_paper_detail, get_paper_reviews, get_paper_revisions,
-    get_paper_story, list_papers, extract_pdf_title_abstract, pdf_page_count)
+    get_paper_revisions_with_body, get_paper_story, list_papers,
+    extract_pdf_title_abstract, pdf_page_count)
 
 report   = analyze(title, abstract, pdf_bytes=None, use_llm=None)  # -> Report
 warmup()                                     # 기동 시 SPECTER2 선로드 (선택)
 detail   = get_paper_detail(paper_id)        # -> PaperDetail | None    (DB만)
 reviews  = get_paper_reviews(paper_id)       # -> list[ReviewDetail] | None
 revs     = get_paper_revisions(paper_id)     # -> PaperRevisions | None (외부 API)
+revs_body = get_paper_revisions_with_body(paper_id, refresh=False)
+                                             # -> PaperRevisions | None (본문 diff 포함, 캐시)
 story    = get_paper_story(paper_id, use_llm=None, refresh=False)
                                              # -> PaperStory | None (외부 API + LLM)
 listing  = list_papers(venue=..., year=..., field=..., q=..., limit=, offset=)
@@ -422,9 +474,10 @@ lift도 Fisher 검정도 무의미하기 때문입니다. 되살리려면
 
 ## 10. 남은 작업
 
-- [ ] **분석 대기 UX** — 현재는 프론트 폴링입니다. 첫 요청이 특히 느리므로(모델 로드)
-      배포 환경에서는 `.env`에 `WARMUP_ON_STARTUP=1`을 켜서 기동 시점으로 옮기세요
-      (기본은 off — 로컬 개발에서 매 기동이 수십 초 느려집니다).
+- [x] **분석 대기 UX** — 여전히 프론트 폴링이지만, `review_predictions.progress`
+      (`alembic 0014`, 2026-08-16)로 단계별 진행 상황을 응답에 실어 보내고, FE가
+      `AnalysisProgress.jsx`로 표시합니다. 배포 환경은 `WARMUP_ON_STARTUP=1`로
+      모델 로드를 기동 시점으로 옮겼습니다(D7, [RUNBOOK.md](../RUNBOOK.md) §4).
 - [ ] **워커 분리 검토** — `BackgroundTasks`는 API 프로세스 안에서 돕니다. 동시 분석이
       늘면 API 응답이 느려지므로, 트래픽이 생기면 별도 워커로 빼야 합니다.
 - [x] **프론트 연동** — [AICE-FE](https://github.com/AICE-GACHON/AICE-FE)(Vite + React)를
