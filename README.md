@@ -116,7 +116,7 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-588개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
+602개입니다. 백엔드 테스트는 실제 Postgres를 쓰고 매 테스트를 롤백합니다. DB가 없거나
 `alembic upgrade head`를 하지 않았으면 해당 테스트만 자동으로 skip됩니다.
 
 린터는 ruff입니다. 규칙은 `pyproject.toml`의 `[tool.ruff]`에 있고, 지금은 "돌려보기
